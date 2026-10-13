@@ -76,7 +76,7 @@ class ConsoleTests(unittest.TestCase):
         if self.failed_command and self.failed_command in argv: return subprocess.CompletedProcess(argv, 1, b"", b"SECRET_DO_NOT_LOG")
         if argv[0] == self.paths.ctl:
             method = argv[3]
-            value = self.responses.get(method, {"peers": self.ps} if method == "getPeers" else {})
+            value = self.responses.get(method, {"peers": self.ps} if method == "getPeers" else {"key": "2"*64} if method == "getSelf" else {})
             return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
         if "systemctl" in argv[0]:
             data = "ActiveState=active\nSubState=running\nMainPID=" + ("1002" if STACK in argv else "1001") + "\nNRestarts=0\nExecMainStatus=0\n"
@@ -85,7 +85,7 @@ class ConsoleTests(unittest.TestCase):
             data = '\n'.join(f'tcp ESTAB 0 0 10.0.0.2:{p} 192.0.2.1:443 users:(("ygg",pid={p},fd=1))' for p in (1001,1002))
         elif "conntrack" in argv[0]:
             data = '\n'.join(f'tcp 6 100 ESTABLISHED src=10.0.0.2 dst=192.0.2.1 sport={p} dport=443 src=192.0.2.1 dst=10.0.0.2 sport=443 dport={p} mark=3905 use=1' for p in (1001,1002))
-        elif "curl" in argv[0]: data = "200 0.001 0.1 0.2"
+        elif "curl" in argv[0]: data = "200 0.001 0.05 0.1 0.2"
         else: data = ""
         return subprocess.CompletedProcess(argv, 0, data.encode(), b"")
 
@@ -300,7 +300,7 @@ class ConsoleTests(unittest.TestCase):
         original = self.ctx.runner
         @logged
         def bad(argv, **kw):
-            if argv[0] == "/usr/bin/curl": return subprocess.CompletedProcess(argv,0,b"503 0.1 0.2 0.3",b"")
+            if argv[0] == "/usr/bin/curl": return subprocess.CompletedProcess(argv,0,b"503 0.1 0.15 0.2 0.3",b"")
             return original(argv, **kw)
         self.ctx.runner=bad
         with self.assertRaises(Failure): main.http_probe(self.ctx,"[200::1]:80")
@@ -408,6 +408,60 @@ class ConsoleTests(unittest.TestCase):
     @logged
     def test_unittest_failure_method_not_shadowed(self):
         with self.assertRaises(AssertionError): self.assertEqual(1, 2)
+
+    @logged
+    def test_remote_own_key_rejected_without_mesh_call(self):
+        self.responses["getSelf"] = {"key": PIN.upper()}
+        for command, argv in (("nodeinfo", [PIN]), ("whois", [PIN]),
+                              *( ("debug-remote", [kind, PIN]) for kind in ("self", "peers", "tree") )):
+            self.calls.clear()
+            args = main.argparse.Namespace(command=command, args=argv,
+                                           apply=False, force=False, full=False, recipient=None)
+            with self.assertRaisesRegex(Failure, "remote_target_is_local"):
+                main.dispatch(self.ctx, args)
+            self.assertEqual([c[3] for c in self.calls if c[0] == self.paths.ctl], ["getSelf"])
+        for value in ({}, {"key": []}, {"key": "invalid"}):
+            self.responses["getSelf"] = value
+            with self.assertRaisesRegex(Failure, "admin_invalid_self_key"):
+                main.remote_key(self.ctx, PIN)
+        self.calls.clear()
+        with self.assertRaisesRegex(Failure, "expected_public_key"):
+            main.remote_key(self.ctx, "invalid")
+        self.assertEqual(self.calls, [])
+
+    @logged
+    def test_http_failure_metrics_do_not_fake_stage_or_log_stderr(self):
+        original = self.ctx.runner
+        @logged
+        def timeout(argv, **kw):
+            if argv[0] == "/usr/bin/curl":
+                return subprocess.CompletedProcess(argv, 28, b"000 0 5.001 5.001 5.001", b"Proxy connection timed out SECRET_DO_NOT_LOG")
+            return original(argv, **kw)
+        self.ctx.runner = timeout
+        capture = io.StringIO()
+        with patch("core.event") as log, contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(Failure, "diagnostic=proxy_connect_timeout") as error:
+                main.http_probe(self.ctx, "[200::1]:80")
+        self.assertIn("curl_rc=28 HTTP=000", capture.getvalue())
+        self.assertNotIn("SECRET", capture.getvalue()+str(error.exception)+str(log.call_args_list))
+
+    @logged
+    def test_http_metrics_unknown_timeout_and_untrusted_values(self):
+        original = self.ctx.runner
+        for payload, rc, expected in ((b"000 0 5 5 5", 28, "timeout_stage_unknown"),
+                                       (b"200 nan 0 0 0", 0, "invalid_metrics"),
+                                       (b"200 inf 0 0 0", 0, "invalid_metrics"),
+                                       (b"200 -1 0 0 0", 0, "invalid_metrics"),
+                                       (b"200 0 0 0 18", 0, "invalid_metrics"),
+                                       (b"200 SECRET 0 0 0", 0, "invalid_metrics"),
+                                       (b"200 0 0 0", 0, "invalid_metrics")):
+            @logged
+            def response(argv, **kw):
+                if argv[0] == "/usr/bin/curl": return subprocess.CompletedProcess(argv, rc, payload, b"SECRET")
+                return original(argv, **kw)
+            self.ctx.runner = response
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(Failure, expected):
+                main.http_probe(self.ctx, "[200::1]:80")
 
 
 @logged

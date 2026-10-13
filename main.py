@@ -3,6 +3,7 @@
 import argparse
 import ipaddress
 import json
+import math
 import re
 import signal
 import sys
@@ -31,6 +32,7 @@ Recovery: snapshot, diff [file], backup [--full --recipient FINGERPRINT],
 Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
          nodeinfo KEY, whois KEY, debug-remote self|peers|tree KEY,
          survey, traceroute KEY (tree inspection, NOT packet route), discover
+         Remote commands require another node's key; own key: use self/peers/tree.
 Guarded/deferred: nameserver show (mutations require firewall review), timer
  show; install/remove via trusted deployer. purge, rotate-key, chaos, upgrade,
  baseline-update fail closed pending separate custody/review. No SimpleX wiring.
@@ -57,27 +59,57 @@ def http_probe(ctx, target):
         raise Failure("overlay_target_required")
     r = ctx.run(["/usr/bin/curl", "-q", "--silent", "--show-error", "--noproxy", "", "--proxy", "socks5h://127.0.0.1:1080",
                  "--connect-timeout", "5", "--max-time", "15", "--max-filesize", "131072", "--proto", "=http",
-                 "--output", "/dev/null", "--write-out", "%{http_code} %{time_connect} %{time_starttransfer} %{time_total}",
-                 "http://" + target + "/"], timeout=17)
+                 "--output", "/dev/null", "--write-out", "%{http_code} %{time_connect} %{time_pretransfer} %{time_starttransfer} %{time_total}",
+                 "http://" + target + "/"], timeout=17, check=False)
     parts = r.stdout.decode().split()
-    if len(parts) != 4 or not parts[0].isdigit() or not 200 <= int(parts[0]) < 300:
+    if len(parts) != 5 or not re.fullmatch(r"[0-9]{3}", parts[0]):
+        raise Failure("overlay_invalid_metrics")
+    try:
+        timings = [float(p) for p in parts[1:]]
+    except ValueError:
+        raise Failure("overlay_invalid_metrics") from None
+    if any(not math.isfinite(t) or not 0 <= t <= 17 for t in timings):
+        raise Failure("overlay_invalid_metrics")
+    # Only validated numeric metrics, never curl's raw stderr/URLs. In failed
+    # proxy negotiation curl can finalize pretransfer/first-byte counters at
+    # the timeout, so these counters do NOT prove that HTTP was reached.
+    connect, ready, first, total = timings
+    print(f"curl_rc={r.returncode} HTTP={parts[0]} curl_connect_counter={connect:.6f}s pretransfer_counter={ready:.6f}s first_byte_counter={first:.6f}s total={total:.6f}s; counters do NOT prove failure stage/remote RTT")
+    if r.returncode:
+        # Translate only known fixed curl messages; never echo arbitrary
+        # server-controlled stderr. Unknown messages must stay unknown.
+        label = "proxy_connect_timeout" if r.returncode == 28 and b"Proxy connection timed out" in r.stderr else "timeout_stage_unknown" if r.returncode == 28 else "transfer_failed"
+        event("state", "http_probe", label)
+        raise Failure(f"overlay_curl_failed:rc={r.returncode}:diagnostic={label}")
+    if not 200 <= int(parts[0]) < 300:
         raise Failure("overlay_http_not_2xx")
-    print(f"HTTP={parts[0]} curl_connect_phase={parts[1]}s first_byte={parts[2]}s total={parts[3]}s; NOT remote RTT")
     return parts
 
 
 @logged
+def remote_key(ctx, value):
+    target = key(value)
+    own = ctx.api("getSelf").get("key")
+    if not isinstance(own, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", own):
+        raise Failure("admin_invalid_self_key")
+    if target == own.lower():
+        raise Failure("remote_target_is_local_use_self_peers_tree_config")
+    return target
+
+
+@logged
 def socks_test(ctx, count=2):
+    start = time.monotonic()
     checks.sockets(ctx)
     targets = ("[21e:a51c:885b:7db0:166e:927:98cd:d186]:80", "[222:a8e4:50cd:55c:788e:b0a5:4e2f:a92c]:80")
     errors = 0
     for i in range(count):
-        print(f"[{i+1}/{count}] overlay HTTP; remaining={count-i-1} ETA<={(count-i)*17}s speed<=128KiB/request", flush=True)
+        print(f"[{i+1}/{count}] overlay HTTP; processed={i}/{count} remaining={count-i-1} elapsed={time.monotonic()-start:.2f}s ETA<={(count-i)*17}s speed<=128KiB/request", flush=True)
         try: http_probe(ctx, targets[i % 2])
         except Failure as exc:
             errors += 1
             print(f"FAIL overlay request: {exc} (bounded timeout/status/size)")
-    print(f"processed={count} errors={errors}")
+    print(f"processed={count} errors={errors} elapsed={time.monotonic()-start:.2f}s")
     if errors: raise Failure("overlay_e2e_failed")
 
 
@@ -194,11 +226,12 @@ def dispatch(ctx, args):
             if len(a) == 2 and a[0] == "dht":
                 raise Failure("remote_dht_not_supported_by_upstream_use_tree")
             if len(a) != 2 or a[0] not in methods: raise Failure("debug_remote_self_peers_tree_key")
-            output(ctx.api(methods[a[0]], key=key(a[1])))
+            output(ctx.api(methods[a[0]], key=remote_key(ctx, a[1])))
         else:
             if len(a) != 1: raise Failure("one_public_key_required")
-            output(ctx.api("getNodeInfo", key=key(a[0])))
-            if cmd == "whois": output(ctx.api("debug_remotegetself", key=key(a[0])))
+            target = remote_key(ctx, a[0])
+            output(ctx.api("getNodeInfo", key=target))
+            if cmd == "whois": output(ctx.api("debug_remotegetself", key=target))
     elif cmd == "peers-score":
         data = checks.peers(ctx)
         output(sorted(data, key=lambda p: (not p["up"], p.get("latency", 0))))
