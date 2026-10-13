@@ -1,5 +1,6 @@
 """Offline regression suite. No live services, network, keys or global paths."""
 import dataclasses
+import contextlib
 import io
 import json
 import os
@@ -49,7 +50,7 @@ class ConsoleTests(unittest.TestCase):
         self.ctx = Context(self.paths, runner=self.runner, require_root=False)
         self.responses = {}
         self.calls = []
-        self.fail = None
+        self.failed_command = None
         self.ps = [{"remote": URI, "up": True, "inbound": False, "latency": 1000000}]
         config = {"Peers": [URI, URI.replace("192.0.2.1", "192.0.2.2"), URI.replace("192.0.2.1", "192.0.2.3")],
                   "IfName": "none", "Listen": [], "MulticastInterfaces": [], "InterfacePeers": {},
@@ -72,7 +73,7 @@ class ConsoleTests(unittest.TestCase):
         self.calls.append(argv)
         if argv[0] == self.paths.decoder:
             return subprocess.CompletedProcess(argv, 0, kwargs["input"], b"")
-        if self.fail and self.fail in argv: return subprocess.CompletedProcess(argv, 1, b"", b"SECRET_DO_NOT_LOG")
+        if self.failed_command and self.failed_command in argv: return subprocess.CompletedProcess(argv, 1, b"", b"SECRET_DO_NOT_LOG")
         if argv[0] == self.paths.ctl:
             method = argv[3]
             value = self.responses.get(method, {"peers": self.ps} if method == "getPeers" else {})
@@ -145,7 +146,7 @@ class ConsoleTests(unittest.TestCase):
 
     @logged
     def test_external_failed_no_secret(self):
-        self.fail = "getPeers"
+        self.failed_command = "getPeers"
         with patch("core.event") as log, self.assertRaises(Failure) as error: checks.peers(self.ctx)
         self.assertNotIn("SECRET", str(error.exception))
         self.assertNotIn("SECRET", str(log.call_args_list))
@@ -158,7 +159,7 @@ class ConsoleTests(unittest.TestCase):
 
     @logged
     def test_multicast_admin_failure_not_empty(self):
-        self.fail = "getMulticastInterfaces"
+        self.failed_command = "getMulticastInterfaces"
         with self.assertRaises(Failure): checks.multicast_gate(self.ctx, False)
 
     @logged
@@ -175,7 +176,7 @@ class ConsoleTests(unittest.TestCase):
     @logged
     def test_notify_off_honoured_unknown_saved(self):
         atomic(self.paths.state/"notify.state", "off\n")
-        self.fail = "getPeers"
+        self.failed_command = "getPeers"
         with self.assertRaises(Failure): telemetry.collect(self.ctx)
         row = telemetry.rows(self.ctx)[0]
         self.assertIsNone(row["up"])
@@ -280,7 +281,7 @@ class ConsoleTests(unittest.TestCase):
 
     @logged
     def test_http_failure_and_status(self):
-        self.fail="/usr/bin/curl"
+        self.failed_command="/usr/bin/curl"
         with self.assertRaises(Failure): main.http_probe(self.ctx,"[200::1]:80")
         for target in ("[::1]:80","[200::1]:65536","example.com:80","[200::1]:80;id"):
             with self.assertRaises((Failure,ValueError)): main.http_probe(self.ctx,target)
@@ -343,6 +344,70 @@ class ConsoleTests(unittest.TestCase):
         with tarfile.open(fileobj=buf,mode="w:gz") as out:
             for _ in range(2):out.addfile(tarfile.TarInfo("config/mode"),io.BytesIO())
         with self.assertRaises(Failure): recovery.inspect_archive(buf.getvalue())
+
+    @logged
+    def test_reject_fifo_without_blocking(self):
+        fifo = self.paths.state / "untrusted.fifo"
+        os.mkfifo(fifo)
+        code = "import sys; sys.path.insert(0, sys.argv[1]); from core import read_regular, Failure; " \
+               "read_regular(sys.argv[2])"
+        result = bounded_process(["/usr/bin/python3", "-B", "-c", code, str(Path(__file__).resolve().parent), str(fifo)], timeout=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"not_regular_file", result.stderr)
+
+    @logged
+    def test_reject_archive_schema_shapes(self):
+        payloads = ([], "bad", {"schema": 1, "keys": False, "sha256": []},
+                    {"schema": 1, "keys": False, "sha256": "bad"},
+                    {"schema": 1, "keys": "false", "sha256": {}},
+                    {"schema": 1, "keys": False, "sha256": {"config/mode": []}})
+        for manifest in payloads:
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+                raw = json.dumps(manifest).encode()
+                info = tarfile.TarInfo("manifest.json"); info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+            with self.subTest(shape=type(manifest).__name__), self.assertRaises(Failure):
+                recovery.inspect_archive(buffer.getvalue())
+
+    @logged
+    def test_graph_bins_cover_requested_window(self):
+        import datetime as dt
+        now = dt.datetime(2026, 10, 13, 19, 0, tzinfo=dt.timezone.utc)
+        sample = {"ts": (now-dt.timedelta(minutes=1)).isoformat(), "up": 1, "errors": [],
+                  "peers": [{"r": URI, "up": True, "rtt": 1}]}
+        atomic(self.paths.state/"metrics.jsonl", json.dumps(sample)+"\n")
+        clock = unittest.mock.Mock(wraps=dt.datetime)
+        clock.now.return_value = now
+        capture = io.StringIO()
+        with patch.object(telemetry.dt, "datetime", clock), contextlib.redirect_stdout(capture):
+            telemetry.stats(self.ctx, hours=1, graph=True)
+        graph = next(line for line in capture.getvalue().splitlines() if len(line)==60 and set(line)<=set("?.#"))
+        self.assertEqual(graph, "?"*59+"#")
+
+    @logged
+    def test_remote_tree_and_retired_dht_contract(self):
+        args = main.argparse.Namespace(command="debug-remote", args=["tree", PIN],
+                                       apply=False, force=False, full=False, recipient=None)
+        main.dispatch(self.ctx, args)
+        self.assertEqual(self.calls[-1][3], "debug_remotegettree")
+        args.args = ["dht", PIN]
+        previous = len(self.calls)
+        with self.assertRaisesRegex(Failure, "remote_dht_not_supported"):
+            main.dispatch(self.ctx, args)
+        self.assertEqual(len(self.calls), previous)
+
+    @logged
+    def test_recovery_journal_schema_rejected(self):
+        for value in ([], "bad", {"old": []}, {"old": {"/etc/passwd": "fixture"}}):
+            atomic(self.paths.state/"transaction.json", json.dumps(value))
+            with self.assertRaisesRegex(Failure, "invalid_recovery_journal"):
+                management.recover_transaction(self.ctx, apply=True)
+            self.assertTrue((self.paths.state/"transaction.json").exists())
+
+    @logged
+    def test_unittest_failure_method_not_shadowed(self):
+        with self.assertRaises(AssertionError): self.assertEqual(1, 2)
 
 
 @logged

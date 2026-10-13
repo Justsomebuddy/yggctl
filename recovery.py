@@ -76,6 +76,11 @@ def inspect_archive(data):
                 if source is None: raise Failure("unreadable_archive_member")
                 files[info.name] = source.read(1048577)
         manifest = json.loads(files.pop("manifest.json"))
+        if (not isinstance(manifest, dict) or type(manifest.get("schema")) is not int
+                or type(manifest.get("keys")) is not bool or not isinstance(manifest.get("sha256"), dict)
+                or any(not isinstance(k, str) or not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{64}", v)
+                       for k, v in manifest["sha256"].items())):
+            raise Failure("invalid_backup_manifest_schema")
         if manifest.get("schema") != 1 or set(manifest["sha256"]) != set(files): raise Failure("backup_manifest_mismatch")
         if any(digest(value) != manifest["sha256"][name] for name, value in files.items()): raise Failure("backup_member_hash_mismatch")
         base = allowed - {"manifest.json"} - {"keys/" + n for n in KEYS}

@@ -29,7 +29,7 @@ Management: start|stop|restart|enable|disable (or stack-*),
 Recovery: snapshot, diff [file], backup [--full --recipient FINGERPRINT],
           restore FILE [--apply], doctor
 Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
-         nodeinfo KEY, whois KEY, debug-remote self|peers|dht KEY,
+         nodeinfo KEY, whois KEY, debug-remote self|peers|tree KEY,
          survey, traceroute KEY (tree inspection, NOT packet route), discover
 Guarded/deferred: nameserver show (mutations require firewall review), timer
  show; install/remove via trusted deployer. purge, rotate-key, chaos, upgrade,
@@ -190,8 +190,10 @@ def dispatch(ctx, args):
         else: socks_test(ctx, bounded_number(a[0],1,3) if a else 1)
     elif cmd in ("nodeinfo", "whois", "debug-remote"):
         if cmd == "debug-remote":
-            methods = {"self": "debug_remotegetself", "peers": "debug_remotegetpeers", "dht": "debug_remotegetdht"}
-            if len(a) != 2 or a[0] not in methods: raise Failure("debug_remote_self_peers_dht_key")
+            methods = {"self": "debug_remotegetself", "peers": "debug_remotegetpeers", "tree": "debug_remotegettree"}
+            if len(a) == 2 and a[0] == "dht":
+                raise Failure("remote_dht_not_supported_by_upstream_use_tree")
+            if len(a) != 2 or a[0] not in methods: raise Failure("debug_remote_self_peers_tree_key")
             output(ctx.api(methods[a[0]], key=key(a[1])))
         else:
             if len(a) != 1: raise Failure("one_public_key_required")

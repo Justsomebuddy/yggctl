@@ -118,7 +118,8 @@ def stats(ctx, hours=24, graph=False):
         print(f"{name}: observed_avail={100*up/len(known):.1f}% present={len(known)} absent={len(matches)-len(known)} median_ms={statistics.median(latency) if latency else 'unknown'}")
         if graph:
             # Bin the entire requested time window, not simply the last 60 samples.
-            begin, end = values[0][0], values[-1][0]
+            end = dt.datetime.now(dt.timezone.utc)
+            begin = end - dt.timedelta(hours=hours)
             bins = [[] for _ in range(60)]
             span = max(1, (end-begin).total_seconds())
             for (at, _), p in zip(values, matches):

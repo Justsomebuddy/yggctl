@@ -163,6 +163,8 @@ def recover_transaction(ctx, apply=False):
         path = ctx.p.state / "transaction.json"
         identity_gate(ctx)
         record = json.loads(read_regular(path).decode())
+        if not isinstance(record, dict) or not isinstance(record.get("old"), dict):
+            raise Failure("invalid_recovery_journal")
         allowed = {str(ctx.p.etc / n) for n in ("mode", "gate.nft", "gate-yggstack.nft", "yggdrasil-lab.conf", "yggstack.conf", "integrity.manifest")}
         old = record.get("old", {})
         if not old or not set(old) <= allowed or any(not isinstance(v, str) for v in old.values()):

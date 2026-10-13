@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.0.2"
+VERSION = "5.0.3"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
@@ -250,7 +250,8 @@ class Context:
 
 @logged
 def read_regular(path, limit=1048576):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    # Reject FIFO/device input after fstat without blocking in open first.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Failure("not_regular_file")
