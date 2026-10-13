@@ -29,6 +29,8 @@ Management: start|stop|restart|enable|disable (or stack-*),
             mode direct|tunnel [--apply], recover-transaction [--apply]
 Recovery: snapshot, diff [file], backup [--full --recipient FINGERPRINT],
           restore FILE [--apply], doctor
+Research: research capture|map [ID]|diff [earlier ID]|report [1..72 hours]
+          Local observations + history only; global size/capacity UNKNOWN.
 Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
          nodeinfo KEY, whois KEY, debug-remote self|peers|tree KEY,
          survey, traceroute KEY (tree inspection, NOT packet route), discover
@@ -121,6 +123,8 @@ def selftest(ctx, offline=False):
         # No runtime files, backups, snapshots or collector mutation.
         from tests import run_suite
         run_suite()
+        from research.tests import run_suite as research_suite
+        research_suite()
         return
     checks.check(ctx)
     for method in ("getSelf", "getTree", "getPaths", "getSessions"):
@@ -204,6 +208,9 @@ def dispatch(ctx, args):
     elif cmd == "report":
         checks.check(ctx)
         telemetry.stats(ctx)
+    elif cmd == "research":
+        import research
+        output(research.command(ctx, a))
     elif cmd in ("logs", "events"):
         n = bounded_number(a[0], 1, 1000) if a else 50
         command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-n", str(n)]

@@ -85,6 +85,7 @@ def integrity(ctx):
                      ctx.p.runtime / "management.py", ctx.p.runtime / "telemetry.py", ctx.p.runtime / "recovery.py",
                      ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
                      ctx.p.etc / "mode", ctx.p.etc / "baseline.env"}
+        required |= {ctx.p.runtime / "research" / n for n in ("__init__.py", "model.py", "metrics.py", "tests.py")}
     if not required <= checked: raise Failure("integrity_coverage_incomplete")
     return len(checked)
 
