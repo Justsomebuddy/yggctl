@@ -776,6 +776,93 @@ class ConsoleTests(unittest.TestCase):
             with self.assertRaisesRegex(Failure, "root_required"):
                 main.dispatch(ctx, args)
 
+    @logged
+    def test_metrics_append_does_not_rewrite_and_compacts_late(self):
+        name, path = "m.jsonl", self.paths.state / "m.jsonl"
+        for i in range(5):
+            telemetry.append(self.ctx, name, {"i": i}, keep=5)
+        inode = path.stat().st_ino
+        telemetry.append(self.ctx, name, {"i": 5}, keep=5)
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual([r["i"] for r in telemetry.rows(self.ctx, name)], [0, 1, 2, 3, 4, 5])
+        telemetry.append(self.ctx, name, {"i": 6}, keep=5)
+        self.assertNotEqual(path.stat().st_ino, inode)
+        self.assertEqual([r["i"] for r in telemetry.rows(self.ctx, name)], [2, 3, 4, 5, 6])
+
+    @logged
+    def test_metrics_torn_tail_is_skipped_and_dropped(self):
+        path = self.paths.state / "m.jsonl"
+        path.write_bytes(b'{"i":0}\n{"i":1')
+        self.assertEqual(telemetry.rows(self.ctx, "m.jsonl"), [{"i": 0}])
+        telemetry.append(self.ctx, "m.jsonl", {"i": 2}, keep=5)
+        self.assertEqual(path.read_bytes(), b'{"i":0}\n{"i":2}\n')
+
+    @logged
+    def test_metrics_append_refuses_symlink(self):
+        target = self.paths.state / "elsewhere"
+        target.write_text("")
+        (self.paths.state / "m.jsonl").symlink_to(target)
+        with self.assertRaises(OSError):
+            telemetry.append(self.ctx, "m.jsonl", {"i": 0})
+        self.assertEqual(target.read_text(), "")
+
+    @logged
+    def test_sandbox_command_drops_privileges_and_hides_keys(self):
+        import sandbox
+        unit, argv = sandbox.command("research", ["report", "1"], "/usr/local/libexec/yggdrasil-lab/main.py")
+        self.assertTrue(unit.startswith("yggctl-sandbox-research-") and unit.endswith(".service"))
+        props = [argv[i + 1] for i, v in enumerate(argv) if v == "-p"]
+        for required in ("NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectHome=yes",
+                         "TemporaryFileSystem=/etc/yggdrasil-lab:mode=0755", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+                         "TemporaryFileSystem=/var/lib/yggdrasil-lab:mode=0755",
+                         "BindPaths=/var/lib/yggdrasil-lab/research"):
+            self.assertIn(required, props)
+        self.assertEqual(argv[argv.index("--") + 1:], ["/usr/bin/python3", "-I", "-B",
+                         "/usr/local/libexec/yggdrasil-lab/main.py", "research", "report", "1"])
+        _, atlas_argv = sandbox.command("atlas", ["status"], "/m.py", trace=True)
+        atlas_props = [atlas_argv[i + 1] for i, v in enumerate(atlas_argv) if v == "-p"]
+        self.assertNotIn("PrivateNetwork=yes", atlas_props)
+        self.assertIn("BindPaths=/var/lib/yggdrasil-lab/atlas", atlas_props)
+        self.assertEqual(atlas_argv[-3:], ["--trace", "atlas", "status"])
+        with self.assertRaises(ValueError):
+            sandbox.properties("checks")
+
+    @logged
+    def test_sandbox_detects_its_own_unit(self):
+        import sandbox
+        with tempfile.TemporaryDirectory() as d:
+            inside, outside = Path(d) / "inside", Path(d) / "outside"
+            inside.write_text("0::/system.slice/yggctl-sandbox-atlas-1a2b3c4d.service\n")
+            outside.write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+            self.assertTrue(sandbox.inside(str(inside)))
+            self.assertFalse(sandbox.inside(str(outside)))
+            self.assertFalse(sandbox.inside(str(Path(d) / "missing")))
+
+    @logged
+    def test_live_paths_run_research_and_atlas_in_sandbox(self):
+        calls = []
+        def attached(argv, stop):
+            calls.append((argv, stop))
+            return 3 if argv[-1] == "status" else 0
+        ctx = Context(Paths(), self.ctx.runner, require_root=False, attached=attached)
+        args = main.argparse.Namespace(command="research", args=["report", "1"], apply=False, force=False,
+                                       full=False, recipient=None)
+        with patch("sandbox.inside", return_value=False):
+            main.dispatch(ctx, args)
+            argv, stop = calls[-1]
+            self.assertEqual(argv[0], "/usr/bin/systemd-run")
+            self.assertEqual(argv[-3:], ["research", "report", "1"])
+            self.assertEqual(stop[:2], ["/usr/bin/systemctl", "stop"])
+            args.command, args.args = "atlas", ["status"]
+            with self.assertRaisesRegex(Failure, "sandboxed_atlas_failed:rc=3"):
+                main.dispatch(ctx, args)
+
+    @logged
+    def test_attached_process_returns_child_status(self):
+        import core
+        self.assertEqual(core.attached_process(["/bin/sh", "-c", "exit 0"], stop=["/bin/true"]), 0)
+        self.assertEqual(core.attached_process(["/bin/sh", "-c", "exit 3"], stop=["/bin/true"]), 3)
+
 
 @logged
 def run_suite():

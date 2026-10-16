@@ -158,7 +158,7 @@ class ResearchTests(ConsoleTests):
     def test_store_symlink_and_permissions_rejected(self):
         root = self.paths.state/"research"; root.symlink_to(self.paths.etc)
         with self.assertRaises(Failure): folder(self.ctx, True)
-        root.unlink(); root.mkdir(mode=0o755)
+        root.unlink(); root.mkdir(); root.chmod(0o755)
         with self.assertRaises(Failure): folder(self.ctx)
 
     @logged

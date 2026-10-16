@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.3.0"
+VERSION = "5.4.0"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
@@ -57,6 +57,11 @@ def event(kind, label, result=""):
             _trace["lines"].append(line)
             return
     syslog.syslog(syslog.LOG_INFO, line)
+
+
+def trace_is_live():
+    with _trace_lock:
+        return _trace["live"]
 
 
 def trace_live():
@@ -150,6 +155,26 @@ def bounded_process(argv, *, input=None, stdout=None, stderr=None, timeout=20, e
         proc.wait()
 
 
+@logged
+def attached_process(argv, *, stop):
+    """Run a long child on this terminal's stdio. If this process is interrupted, stop
+    the child's unit first, then wait for the child to exit."""
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+    proc = subprocess.Popen(argv, env=env, close_fds=True)
+    try:
+        return proc.wait()
+    except BaseException:
+        try:
+            subprocess.run(stop, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False)
+        finally:
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        raise
+
+
 @dataclasses.dataclass(frozen=True)
 class Paths:
     etc: Path = Path("/etc/yggdrasil-lab")
@@ -166,9 +191,10 @@ class Paths:
 
 class Context:
     @logged
-    def __init__(self, paths=None, runner=None, require_root=True):
+    def __init__(self, paths=None, runner=None, require_root=True, attached=None):
         self.p = paths or Paths()
         self.runner = runner or bounded_process
+        self.attached = attached or attached_process
         self.require_root = require_root
         self.lock_depth = 0
         self.thread_lock = threading.RLock()
@@ -197,6 +223,18 @@ class Context:
         if check and r.returncode:
             raise Failure(f"external_failed:{executable}:rc={r.returncode}")
         return r
+
+    @logged
+    def run_attached(self, argv, *, stop):
+        executable = Path(argv[0]).name
+        event("external_start", executable)
+        try:
+            rc = self.attached(list(map(str, argv)), stop=list(map(str, stop)))
+        except OSError as exc:
+            event("external_error", executable, type(exc).__name__)
+            raise Failure(f"external_unavailable:{executable}") from None
+        event("external_exit", executable, f"rc={rc}")
+        return rc
 
     @logged
     def api(self, method, *, stack=False, **values):

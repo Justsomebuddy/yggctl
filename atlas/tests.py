@@ -200,7 +200,7 @@ class AtlasTests(ConsoleTests):
     def test_symlink_mode_database_fifo_rejected(self):
         root=self.paths.state/'atlas';root.symlink_to(self.paths.etc,target_is_directory=True)
         with self.assertRaises(Failure):Store(self.ctx,True).__enter__()
-        root.unlink();root.mkdir(mode=0o755)
+        root.unlink();root.mkdir();root.chmod(0o755)
         with self.assertRaises(Failure):Store(self.ctx,True).__enter__()
         root.chmod(0o700);os.mkfifo(root/'atlas.sqlite',0o600)
         with self.assertRaises(Failure):Store(self.ctx,True).__enter__()

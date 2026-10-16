@@ -13,11 +13,12 @@ from pathlib import Path
 
 # -I removes PYTHONPATH and the repository cwd. Installed directory is root-owned.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core import Context, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number, event, trace_live, finish_run
+from core import Context, Paths, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number, event, trace_live, finish_run
 import checks
 import management
 import telemetry
 import recovery
+import sandbox
 
 HELP = """yggctl 5 — trusted root-owned CLI (sudo for full data)
 Health: check, selftest [offline], status, guard, verify-hashes, socks, socks-test
@@ -44,6 +45,8 @@ Guarded/deferred: nameserver show (mutations require firewall review), timer
  show; install/remove via trusted deployer. purge, rotate-key, chaos, upgrade,
  baseline-update fail closed pending separate custody/review. No SimpleX wiring.
 Without sudo: help, version, update-check, stats, graph (metrics group-readable).
+Research and atlas run in a transient systemd sandbox: no capabilities, read-only
+ system, no node keys; research without network.
 Logging: one syslog summary line per run; the call trace is written only when
  the run fails, or always with --trace.
 Exit 0 verified success/explicit preview; 1 failure; 2 parser; 77 root required.
@@ -223,6 +226,10 @@ def dispatch(ctx, args):
     elif cmd == "report":
         checks.check(ctx)
         telemetry.stats(ctx)
+    elif cmd in ("research", "atlas") and not sandbox.inside() and ctx.p == Paths():
+        # The live system runs these in a transient systemd sandbox (see sandbox.py).
+        rc = sandbox.run(ctx, cmd, a, Path(__file__).resolve())
+        if rc: raise Failure(f"sandboxed_{cmd}_failed:rc={rc}")
     elif cmd == "research":
         import research
         output(research.command(ctx, a))

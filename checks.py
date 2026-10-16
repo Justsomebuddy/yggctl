@@ -84,7 +84,7 @@ def integrity(ctx):
         required |= {ctx.p.units / TIMER, ctx.p.units / "ygg-metrics.service", Path("/usr/bin/yggctl"),
                      ctx.p.runtime / "main.py", ctx.p.runtime / "core.py", ctx.p.runtime / "checks.py",
                      ctx.p.runtime / "management.py", ctx.p.runtime / "telemetry.py", ctx.p.runtime / "recovery.py",
-                     ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
+                     ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", ctx.p.runtime / "sandbox.py", Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
                      ctx.p.etc / "mode", ctx.p.etc / "baseline.env"}
         required.add(ctx.p.etc / "baseline-runtime-public.txt")
         required.add(ctx.p.etc / "baseline-nft-mullvad.txt")

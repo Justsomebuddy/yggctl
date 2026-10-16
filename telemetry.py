@@ -2,6 +2,7 @@
 import datetime as dt
 import json
 import os
+import stat
 import statistics
 import time
 
@@ -13,8 +14,11 @@ from checks import peers
 def rows(ctx, name="metrics.jsonl"):
     path = ctx.p.state / name
     if not path.exists(): return []
+    data = read_regular(path, 32 * 1024 * 1024)
+    # An append in progress (or one torn by a crash) leaves an incomplete last line; skip it.
+    if not data.endswith(b"\n"): data = data[:data.rfind(b"\n") + 1]
     values = []
-    for line in read_regular(path, 32 * 1024 * 1024).splitlines():
+    for line in data.splitlines():
         try:
             item = json.loads(line)
             if not isinstance(item, dict): raise ValueError()
@@ -26,10 +30,33 @@ def rows(ctx, name="metrics.jsonl"):
 
 @logged
 def append(ctx, name, row, keep=10000):
-    values = rows(ctx, name)
-    values.append(row)
-    atomic(ctx.p.state / name, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]), 0o640)
-    os.chown(ctx.p.state / name, -1, ctx.p.state.stat().st_gid)
+    """Append one row. The file is rewritten to the newest `keep` rows only once it has
+    grown about 20 % past them (about every 1.4 days for the minute collector), not on
+    every sample."""
+    path = ctx.p.state / name
+    line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o640)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode): raise Failure("metric_file_not_regular")
+        if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
+            # Drop a line torn by a crash before appending after it.
+            tail = os.pread(fd, min(info.st_size, 1 << 20), max(0, info.st_size - (1 << 20)))
+            cut = tail.rfind(b"\n")
+            if cut < 0 and info.st_size > len(tail): raise Failure("corrupt_metric_tail")
+            os.ftruncate(fd, info.st_size - len(tail) + cut + 1)
+        view = memoryview(line)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+        size = os.fstat(fd).st_size
+    finally:
+        os.close(fd)
+    os.chown(path, -1, ctx.p.state.stat().st_gid)
+    if size > len(line) * keep * 6 // 5:
+        values = rows(ctx, name)
+        atomic(path, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]), 0o640)
+        os.chown(path, -1, ctx.p.state.stat().st_gid)
 
 
 @logged
