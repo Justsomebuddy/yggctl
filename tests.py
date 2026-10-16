@@ -986,6 +986,23 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(telemetry.peer_alerts(self.ctx, sample(25, True)), [])
 
     @logged
+    def test_unstable_peer_alert_from_reconnects(self):
+        import datetime as dt
+        start = dt.datetime(2026, 10, 16, 12, 0, tzinfo=dt.timezone.utc)
+        def sample(minute):
+            return {"ts": (start + dt.timedelta(minutes=minute)).isoformat(), "peers": [{"r": URI, "up": True}]}
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(0), {URI: 20}), [])
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(1), {URI: 80}), [])  # same connection
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(10), {URI: 30}), [])
+        alerts = telemetry.peer_alerts(self.ctx, sample(20), {URI: 5})
+        self.assertEqual(alerts, [{"kind": "ygg-peer-unstable", "peer": URI, "count": 3, "up": 1, "total": 1}])
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(30), {URI: 10}), [])  # no repeat within 6 h
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(95), {URI: 3500}), [])  # old drops aged out
+        message = telemetry.alert_message(alerts[0])
+        self.assertEqual(message["rule"], "Yggdrasil: пир нестабилен")
+        self.assertIn("3 разрывов за последний час", message["output"])
+
+    @logged
     def test_alerts_forward_once_and_retry_failures(self):
         sent, rc = [], [0]
         def runner(argv, **kw):

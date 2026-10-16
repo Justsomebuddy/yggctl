@@ -22,37 +22,35 @@ import telemetry
 import recovery
 import sandbox
 
-HELP = """yggctl 5 — trusted root-owned CLI (sudo for full data)
-Health: check, selftest [offline], status, guard, verify-hashes, socks, socks-test
-View: peers, stack-peers, self, tree, paths, sessions, config [show|validate],
-      mode [show], version, update-check, logs [N], events [hours], firewall-status
-Metrics: collect, stats [hours], graph [hours], watch/top [N] [seconds],
-         notify on|off|show|test, alerts-forward, report, peers-score
-Management: start|stop|restart|enable|disable (or stack-*),
-            add-peer URI [--force] [--apply], remove-peer IPv4:port [--apply],
-            mode direct|tunnel [--apply], recover-transaction [--apply]
-Recovery: snapshot, diff [file], backup [--full --recipient FINGERPRINT],
-          restore FILE [--apply], doctor
-Research: research capture|map [ID]|diff [earlier ID]|report [1..72 hours]
-          Local observations + history only; global size/capacity UNKNOWN.
-Atlas: atlas catalogue|new|crawl [1..120 minutes]|status|report
-  crawl without a duration completes the discovered frontier; duration saves one slice.
-       Whole public catalogue + resumable discovered-key frontier, no32-key cutoff.
-       Remote lists may truncate; geography is a claim, NOT world completeness.
-Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
-         nodeinfo KEY, whois KEY, debug-remote self|peers|tree KEY,
-         survey, traceroute KEY (tree inspection, NOT packet route), discover
-         Remote commands require another node's key; own key: use self/peers/tree.
-Guarded/deferred: nameserver show (mutations require firewall review), timer
- show; install/remove via trusted deployer. purge, rotate-key, chaos, upgrade,
- baseline-update fail closed pending separate custody/review.
-Without sudo: help, version, update-check, stats, graph (metrics group-readable).
-Research, atlas and overlay commands run sandboxed as user ygglab-worker (no root,
- no node keys); research has no network, overlay commands reach only localhost.
-Alerts (peer down 10+ min, its recovery, node health) go to SimpleX while notify is on.
-Logging: one syslog summary line per run; the call trace is written only when
- the run fails, or always with --trace.
-Exit 0 verified success/explicit preview; 1 failure; 2 parser; 77 root required.
+HELP = """yggctl 5 — управление нодой Yggdrasil лаборатории (принадлежит root; полные данные — через sudo)
+
+Здоровье:     check (15 проверок), status, selftest [offline], guard, verify-hashes, socks, socks-test
+Просмотр:     peers, stack-peers, self, tree, paths, sessions, config [show|validate], mode [show],
+              version, update-check, logs [N], events [часы], firewall-status
+Метрики:      collect, stats [часы], graph [часы], watch/top [N] [секунды], report, peers-score,
+              notify on|off|show|test, alerts-forward
+Управление:   start, stop, restart, enable, disable (с приставкой stack- — для стека),
+              add-peer URI [--force] [--apply], remove-peer IPv4:порт [--apply],
+              mode direct|tunnel [--apply], recover-transaction [--apply].
+              Без --apply изменение только показывается.
+Восстановление: snapshot, diff [файл], backup [--full --recipient ОТПЕЧАТОК], restore ФАЙЛ [--apply], doctor
+Исследования: research capture|map [ID]|diff [ранний ID]|report [1..72 часа] — снимки своей ноды
+              и их история; размер всей сети неизвестен.
+Атлас:        atlas catalogue|new|crawl [1..120 минут]|status|report — весь публичный каталог пиров и
+              обход найденных ключей; crawl без срока идёт до конца очереди, со сроком — один отрезок.
+              Страна узла — его заявление, а не геолокация.
+Сеть Yggdrasil: ping [IPv6]:порт (время HTTP, не ICMP), bench [N], nodeinfo КЛЮЧ, whois КЛЮЧ,
+              debug-remote self|peers|tree КЛЮЧ, survey, traceroute КЛЮЧ (дерево, а не путь пакетов),
+              discover. Для своей ноды — self, peers, tree.
+Закрыто:      nameserver и timer — только show; purge, rotate-key, chaos, upgrade, baseline-update
+              отключены до отдельного ревью. Установка — scripts/deployment/deploy.sh.
+Без sudo:     help, version, update-check, stats, graph.
+Песочница:    research, atlas и команды сети Yggdrasil работают от пользователя ygglab-worker без
+              root и без ключей; у research нет сети, у сетевых команд — только localhost.
+Тревоги:      пир недоступен 10+ минут, нестабилен (3+ разрыва за час) или вернулся, сбой ноды —
+              в SimpleX, пока notify включён.
+Журнал:       одна строка на запуск; след вызовов — при сбое или с --trace.
+Коды выхода:  0 — успех или показ изменения; 1 — сбой; 2 — ошибка аргументов; 77 — нужен root.
 """
 
 

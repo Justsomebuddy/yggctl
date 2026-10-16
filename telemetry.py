@@ -84,19 +84,25 @@ def notify(ctx, action):
 
 
 PEER_DOWN_MINUTES = 10
+UNSTABLE_RECONNECTS = 3    # reconnects within the last hour that make a peer "unstable"
+UNSTABLE_REPEAT_HOURS = 6  # at most one "unstable" alert per peer in this time
 
 
 @logged
-def peer_alerts(ctx, sample):
-    """Changes worth an alert: a peer down for PEER_DOWN_MINUTES, and its recovery.
-    Down peers are tracked in alert-state.json, rewritten only when the set changes."""
+def peer_alerts(ctx, sample, uptimes=None):
+    """Changes worth an alert: a peer down for PEER_DOWN_MINUTES, its recovery, and a peer
+    that reconnected UNSTABLE_RECONNECTS times within an hour (from the node's per-peer
+    uptime, which also catches drops shorter than the sampling interval). State lives in
+    alert-state.json and is rewritten only when something changes."""
     try:
         state = json.loads(ctx.read_state("alert-state.json", 65536) or b"{}")
-        down = state.get("down", {}) if isinstance(state, dict) else {}
     except ValueError:
-        down = {}
-    if not isinstance(down, dict):
-        down = {}
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    down = state.get("down", {}) if isinstance(state.get("down"), dict) else {}
+    starts = state.get("starts", {}) if isinstance(state.get("starts"), dict) else {}
+    unstable = state.get("unstable", {}) if isinstance(state.get("unstable"), dict) else {}
     now = dt.datetime.fromisoformat(sample["ts"])
     peers = [p for p in sample.get("peers", []) if isinstance(p.get("r"), str) and p.get("r")]
     up, total = sum(bool(p.get("up")) for p in peers), len(peers)
@@ -117,9 +123,45 @@ def peer_alerts(ctx, sample):
             changes.append({"kind": "ygg-peer-down", "peer": p["r"], "minutes": minutes, "up": up, "total": total})
             alerted = True
         tracked[p["r"]] = {"since": since.isoformat(), "alerted": alerted}
-    if tracked != down:
-        atomic(ctx.p.state / "alert-state.json", json.dumps({"down": tracked}, sort_keys=True) + "\n", 0o600)
+    new_starts, new_unstable = reconnects(starts, unstable, uptimes or {}, now, peers, up, total, changes)
+    new_state = {"down": tracked, "starts": new_starts, "unstable": new_unstable}
+    if new_state != {"down": down, "starts": starts, "unstable": unstable}:
+        atomic(ctx.p.state / "alert-state.json", json.dumps(new_state, sort_keys=True) + "\n", 0o600)
     return changes
+
+
+@logged
+def reconnects(starts, unstable, uptimes, now, peers, up, total, changes):
+    """Record each connection start (now - uptime) once and flag peers that reconnect too often."""
+    hour_ago = now - dt.timedelta(hours=1)
+    new_starts, new_unstable = {}, {}
+    for p in peers:
+        uri = p["r"]
+        seen = []
+        for value in starts.get(uri, []) if isinstance(starts.get(uri), list) else []:
+            try:
+                at = dt.datetime.fromisoformat(value)
+            except (TypeError, ValueError):
+                continue
+            if at >= hour_ago:
+                seen.append(at)
+        uptime = uptimes.get(uri)
+        if p.get("up") and isinstance(uptime, (int, float)) and 0 <= uptime < 86400:
+            start = now - dt.timedelta(seconds=uptime)
+            if start >= hour_ago and not any(abs((start - at).total_seconds()) < 15 for at in seen):
+                seen.append(start)
+        if seen:
+            new_starts[uri] = [at.isoformat() for at in sorted(seen)]
+        try:
+            last = dt.datetime.fromisoformat(unstable[uri]) if uri in unstable else None
+        except (TypeError, ValueError):
+            last = None
+        if last and now - last < dt.timedelta(hours=UNSTABLE_REPEAT_HOURS):
+            new_unstable[uri] = last.isoformat()
+        elif len(seen) >= UNSTABLE_RECONNECTS:
+            changes.append({"kind": "ygg-peer-unstable", "peer": uri, "count": len(seen), "up": up, "total": total})
+            new_unstable[uri] = now.isoformat()
+    return new_starts, new_unstable
 
 
 SENDER = "/usr/local/bin/simplex-alert.sh"
@@ -127,6 +169,9 @@ MESSAGES = {
     "ygg-peer-down": ("Yggdrasil: пир недоступен", "Warning",
                       "Нода yggdrasil-lab: пир {peer} недоступен {minutes} мин; на связи {up} из {total}. "
                       "Проверка: sudo yggctl peers"),
+    "ygg-peer-unstable": ("Yggdrasil: пир нестабилен", "Warning",
+                          "Нода yggdrasil-lab: пир {peer} нестабилен — {count} разрывов за последний час; "
+                          "на связи {up} из {total}. Проверка: sudo yggctl peers"),
     "ygg-peer-up": ("Yggdrasil: пир снова на связи", "Warning",
                     "Нода yggdrasil-lab: пир {peer} снова на связи после {minutes} мин; на связи {up} из {total}."),
     "ygg-health": ("Yggdrasil: сбой ноды", "Error",
@@ -147,7 +192,7 @@ def alert_id(alert):
 def alert_message(alert):
     default = ("Yggdrasil: тревога", "Warning", "Нода yggdrasil-lab: {kind}")
     rule, priority, text = MESSAGES.get(alert.get("kind"), default)
-    fields = {k: str(v)[:120] for k, v in alert.items() if k in ("peer", "minutes", "up", "total", "kind")}
+    fields = {k: str(v)[:120] for k, v in alert.items() if k in ("peer", "minutes", "up", "total", "kind", "count")}
     fields["errors"] = ", ".join(str(e)[:60] for e in alert.get("errors", [])[:5]) or "неизвестно"
     try:
         output = text.format(**fields)
@@ -195,6 +240,7 @@ def forward(ctx):
 def collect(ctx):
     ctx.root()
     with ctx.locked():
+        uptimes = {}
         sample = {"schema": 2, "ts": timestamp(), "mode": None, "act": "unknown", "up": None,
                   "peers": [], "stack_up": None, "errors": []}
         try:
@@ -204,6 +250,7 @@ def collect(ctx):
                 ps = peers(ctx, stack)  # Exactly one coherent admin query per instance.
                 if stack: sample["stack_up"] = sum(p["up"] for p in ps)
                 else:
+                    uptimes = {p.get("remote"): p.get("uptime") for p in ps}
                     sample["act"] = active
                     sample["up"] = sum(p["up"] for p in ps)
                     sample["peers"] = [{"r": p.get("remote", ""), "up": p["up"],
@@ -214,7 +261,7 @@ def collect(ctx):
             sample["errors"].append(str(exc) if isinstance(exc, Failure) else "metric_unavailable")
         if sample["up"] == 0 or sample["stack_up"] == 0: sample["errors"].append("no_up_peers")
         append(ctx, "metrics.jsonl", sample)
-        changes = peer_alerts(ctx, sample)
+        changes = peer_alerts(ctx, sample, uptimes)
         if notify_state(ctx) == "on":
             for change in changes:
                 append(ctx, "alerts.jsonl", {"ts": sample["ts"], "id": secrets.token_hex(8), **change}, 1000)
