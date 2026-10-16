@@ -1,6 +1,7 @@
 """Trusted paths, secret-safe tracing, execution, parsing and atomic I/O."""
 from __future__ import annotations
 
+import collections
 import contextlib
 import dataclasses
 import datetime as dt
@@ -22,7 +23,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.2.1"
+VERSION = "5.3.0"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
@@ -35,9 +36,52 @@ class Failure(Exception):
     pass
 
 
+# Routine call tracing (entry/exit, successful external calls, the mutation lock)
+# is held in memory and reaches syslog only with --trace or when the run fails;
+# errors, alerts and other state changes are written at once. Every run ends with
+# one summary line. The tracing sink itself is not traced.
+TRACE_KEEP = 400
+_ROUTINE = frozenset({"entry", "exit", "external_start", "external_exit"})
+_ROUTINE_STATE = frozenset({"mutation_lock"})
+_trace_lock = threading.Lock()
+_trace = {"live": False, "held": 0, "lines": collections.deque(maxlen=TRACE_KEEP)}
+
+
 def event(kind, label, result=""):
     """Only trusted identifiers/results, never function args or subprocess output."""
-    syslog.syslog(syslog.LOG_INFO, f"yggctl {kind} {label} {result}"[:256])
+    line = f"yggctl {kind} {label} {result}"[:256]
+    routine = kind in _ROUTINE or (kind == "state" and label in _ROUTINE_STATE)
+    with _trace_lock:
+        if routine and not _trace["live"]:
+            _trace["held"] += 1
+            _trace["lines"].append(line)
+            return
+    syslog.syslog(syslog.LOG_INFO, line)
+
+
+def trace_live():
+    """--trace: write the held trace now and every later event at once."""
+    with _trace_lock:
+        lines = list(_trace["lines"])
+        _trace["lines"].clear()
+        _trace["live"] = True
+    for line in lines:
+        syslog.syslog(syslog.LOG_INFO, line)
+
+
+def finish_run(command, status):
+    """Write the run summary; a failed run first writes its held trace."""
+    with _trace_lock:
+        held = _trace["held"]
+        lines = list(_trace["lines"]) if status else []
+        _trace["lines"].clear()
+        _trace["held"] = 0
+    for line in lines:
+        syslog.syslog(syslog.LOG_INFO, line)
+    summary = f"yggctl run {command} status={status} traced={held}"
+    if status and held > len(lines):
+        summary += f" trace_kept={len(lines)}"
+    syslog.syslog(syslog.LOG_INFO, summary[:256])
 
 
 def logged(fn):

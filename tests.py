@@ -682,6 +682,100 @@ class ConsoleTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(Failure, expected):
                 main.http_probe(self.ctx, "[200::1]:80")
 
+    @logged
+    def test_routine_trace_is_held_and_summarized(self):
+        import core
+        with patch("core.syslog.syslog") as sink:
+            core.finish_run("reset", 0)
+            sink.reset_mock()
+            core.event("entry", "probe")
+            core.event("external_start", "systemctl")
+            core.event("state", "mutation_lock", "acquired")
+            core.event("exit", "probe", "success")
+            self.assertEqual(sink.call_count, 0)
+            core.finish_run("collect", 0)
+        self.assertEqual([c.args[1] for c in sink.call_args_list], ["yggctl run collect status=0 traced=4"])
+
+    @logged
+    def test_failed_run_writes_held_trace_before_summary(self):
+        import core
+        with patch("core.syslog.syslog") as sink:
+            core.finish_run("reset", 0)
+            sink.reset_mock()
+            core.event("entry", "probe")
+            core.event("exit", "probe", "success")
+            core.finish_run("collect", 1)
+        self.assertEqual([c.args[1] for c in sink.call_args_list],
+                         ["yggctl entry probe ", "yggctl exit probe success", "yggctl run collect status=1 traced=2"])
+
+    @logged
+    def test_errors_alerts_and_state_changes_are_written_at_once(self):
+        import core
+        with patch("core.syslog.syslog") as sink:
+            core.finish_run("reset", 0)
+            sink.reset_mock()
+            core.event("error", "probe", "Failure")
+            core.event("external_error", "systemctl", "OSError")
+            core.event("alert", "collect", "peer_down")
+            core.event("state", "runtime_policy", "changed")
+            self.assertEqual(sink.call_count, 4)
+            core.finish_run("collect", 0)
+        self.assertEqual(sink.call_args_list[-1].args[1], "yggctl run collect status=0 traced=0")
+
+    @logged
+    def test_trace_flag_writes_everything_at_once(self):
+        import core
+        with patch("core.syslog.syslog") as sink:
+            core.finish_run("reset", 0)
+            sink.reset_mock()
+            core.event("entry", "probe")
+            try:
+                core.trace_live()
+                self.assertEqual([c.args[1] for c in sink.call_args_list], ["yggctl entry probe "])
+                core.event("exit", "probe", "success")
+                self.assertEqual(sink.call_args_list[-1].args[1], "yggctl exit probe success")
+            finally:
+                core._trace["live"] = False
+            core.finish_run("status", 0)
+        self.assertEqual(sink.call_args_list[-1].args[1], "yggctl run status status=0 traced=1")
+
+    @logged
+    def test_held_trace_is_bounded(self):
+        import core
+        with patch("core.syslog.syslog") as sink:
+            core.finish_run("reset", 0)
+            sink.reset_mock()
+            for _ in range(core.TRACE_KEEP + 50):
+                core.event("entry", "probe")
+            core.finish_run("collect", 1)
+        lines = [c.args[1] for c in sink.call_args_list]
+        self.assertEqual(len(lines), core.TRACE_KEEP + 1)
+        self.assertEqual(lines[-1], f"yggctl run collect status=1 traced={core.TRACE_KEEP + 50} trace_kept={core.TRACE_KEEP}")
+
+    @logged
+    def test_run_label_logs_only_documented_commands(self):
+        self.assertEqual(main.run_label("collect"), "collect")
+        self.assertEqual(main.run_label("stack-peers"), "stack-peers")
+        self.assertEqual(main.run_label("pears"), "other")
+        self.assertEqual(main.run_label("tls://192.0.2.1:443"), "other")
+        self.assertEqual(main.run_label(""), "other")
+
+    @logged
+    def test_stats_without_sudo_reads_group_readable_metrics(self):
+        import datetime as dt
+        sample = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(), "up": 1, "errors": [],
+                  "peers": [{"r": URI, "up": True, "rtt": 1}]}
+        atomic(self.paths.state/"metrics.jsonl", json.dumps(sample)+"\n")
+        ctx = Context(self.paths, self.ctx.runner, require_root=True)
+        args = main.argparse.Namespace(command="stats", args=["1"], apply=False, force=False, full=False, recipient=None)
+        capture = io.StringIO()
+        with patch("main.os.geteuid", return_value=1000), contextlib.redirect_stdout(capture):
+            main.dispatch(ctx, args)
+        self.assertIn("window=1h samples=1 ", capture.getvalue())
+        with patch("main.os.geteuid", return_value=1000), patch("main.os.access", return_value=False):
+            with self.assertRaisesRegex(Failure, "root_required"):
+                main.dispatch(ctx, args)
+
 
 @logged
 def run_suite():

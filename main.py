@@ -4,6 +4,7 @@ import argparse
 import ipaddress
 import json
 import math
+import os
 import re
 import signal
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 
 # -I removes PYTHONPATH and the repository cwd. Installed directory is root-owned.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core import Context, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number, event
+from core import Context, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number, event, trace_live, finish_run
 import checks
 import management
 import telemetry
@@ -42,6 +43,9 @@ Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
 Guarded/deferred: nameserver show (mutations require firewall review), timer
  show; install/remove via trusted deployer. purge, rotate-key, chaos, upgrade,
  baseline-update fail closed pending separate custody/review. No SimpleX wiring.
+Without sudo: help, version, update-check, stats, graph (metrics group-readable).
+Logging: one syslog summary line per run; the call trace is written only when
+ the run fails, or always with --trace.
 Exit 0 verified success/explicit preview; 1 failure; 2 parser; 77 root required.
 """
 
@@ -165,6 +169,13 @@ def dispatch(ctx, args):
     if cmd == "selftest" and a == ["offline"]:
         selftest(ctx, True)
         return
+    if cmd in ("stats", "graph"):
+        # Read-only and lock-free: the metrics file is group-readable, so sudo is
+        # needed only when this user cannot read it.
+        if os.geteuid() != 0 and not os.access(ctx.p.state / "metrics.jsonl", os.R_OK):
+            ctx.root()
+        telemetry.stats(ctx, bounded_number(a[0], 1, 72) if a else (6 if cmd == "graph" else 24), cmd == "graph")
+        return
     ctx.root()
     api = {"peers": "getPeers", "stack-peers": "getPeers", "self": "getSelf", "tree": "getTree", "paths": "getPaths", "sessions": "getSessions"}
     if cmd in api:
@@ -196,8 +207,6 @@ def dispatch(ctx, args):
         management.change_peer(ctx, a[0], cmd == "remove-peer", args.force, args.apply)
     elif cmd == "recover-transaction": management.recover_transaction(ctx, args.apply)
     elif cmd == "collect": telemetry.collect(ctx)
-    elif cmd in ("stats", "graph"):
-        telemetry.stats(ctx, bounded_number(a[0], 1, 72) if a else (6 if cmd == "graph" else 24), cmd == "graph")
     elif cmd in ("watch", "top"):
         telemetry.watch(ctx, bounded_number(a[0], 1, 60) if a else 5, bounded_number(a[1], 1, 30) if len(a)>1 else 2)
     elif cmd == "notify": telemetry.notify(ctx, a[0] if len(a) == 1 else "show")
@@ -269,6 +278,17 @@ def dispatch(ctx, args):
     else: raise Failure("unknown_command_use_help")
 
 
+# Only command words documented in HELP reach the run summary; anything else is "other".
+RUN = {"command": "other"}
+
+
+@logged
+def run_label(command):
+    if re.fullmatch(r"[a-z][a-z-]{0,23}", command or "") and re.search(rf"(?<![\w-]){re.escape(command)}(?![\w-])", HELP):
+        return command
+    return "other"
+
+
 @logged
 def interrupted(signum, frame):
     raise Failure("interrupted_rollback_requested")
@@ -284,8 +304,11 @@ def main():
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--recipient")
     parser.add_argument("--help", action="store_true")
+    parser.add_argument("--trace", action="store_true")
     args = parser.parse_intermixed_args()
     if args.help: args.command = "help"
+    if args.trace: trace_live()
+    RUN["command"] = run_label(args.command)
     signal.signal(signal.SIGTERM, interrupted)
     start = time.monotonic()
     try:
@@ -302,4 +325,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    status = 1
+    try:
+        status = main()
+    except SystemExit as exc:
+        status = exc.code if isinstance(exc.code, int) else 2
+        raise
+    finally:
+        finish_run(RUN["command"], status)
+    sys.exit(status)
