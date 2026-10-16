@@ -96,6 +96,225 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(uri, URI)
 
     @logged
+    def policy_fixture(self, current=None):
+        reference = b'public (active)\n  ports: \n  rich rules: \n\trule family="ipv4" accept\n\trule family="ipv6" drop\n'
+        current = current if current is not None else reference
+        atomic(self.paths.etc/"baseline-runtime-public.txt", reference)
+        expected = {"FW_RUNTIME_SHA": digest(reference), "FW_PERMANENT_SHA": "1"*64, "NFT_MULLVAD_SHA": "2"*64}
+        observed = dict(expected, FW_RUNTIME_SHA=digest(current))
+        self.ctx.runner = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, current, b"")
+        return reference, expected, observed
+
+    @logged
+    def test_policy_exact_hash_without_reference(self):
+        _, expected, observed = self.policy_fixture()
+        (self.paths.etc/"baseline-runtime-public.txt").unlink()
+        with patch("checks.baseline", return_value=expected), patch("checks.policy", return_value=observed):
+            checks.policy_gate(self.ctx)
+        self.assertEqual(self.calls, [])
+
+    @logged
+    def test_policy_legacy_anchored_rule_permutation(self):
+        reference, _, _ = self.policy_fixture()
+        prefix, rules = reference.split(b"  rich rules: \n")
+        current = prefix + b"  rich rules: \n" + b"".join(reversed(rules.splitlines(keepends=True)))
+        _, expected, observed = self.policy_fixture(current)
+        with patch("checks.baseline", return_value=expected), patch("checks.policy", return_value=observed):
+            checks.policy_gate(self.ctx)
+
+    @logged
+    def test_policy_changed_fields_or_rules_rejected(self):
+        reference, _, _ = self.policy_fixture()
+        variants = (reference.replace(b"ports: ", b"ports: 22/tcp"),
+                    reference.replace(b"ipv4", b"ipv6", 1),
+                    reference.replace(b" accept", b" drop"),
+                    reference + b'\trule accept\n',
+                    reference.replace(b'\trule family="ipv6" drop\n', b""),
+                    reference + b'\trule family="ipv6" drop\n',
+                    reference + b"  forward: yes\n")
+        for current in variants:
+            with self.subTest(current=current):
+                _, expected, observed = self.policy_fixture(current)
+                with patch("checks.baseline", return_value=expected), patch("checks.policy", return_value=observed), self.assertRaises(Failure):
+                    checks.policy_gate(self.ctx)
+
+    @logged
+    def test_policy_untrusted_reference_and_race_rejected(self):
+        reference, _, _ = self.policy_fixture()
+        current = reference.replace(b"ipv4", b"ipv6", 1)
+        for state in ("missing", "symlink", "wrong_hash", "race"):
+            with self.subTest(state=state):
+                _, expected, observed = self.policy_fixture(current)
+                p = self.paths.etc/"baseline-runtime-public.txt"
+                if state == "missing": p.unlink()
+                elif state == "symlink":
+                    p.unlink(); p.symlink_to(self.paths.etc/"mode")
+                elif state == "wrong_hash": atomic(p, current)
+                else:
+                    self.ctx.runner = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, reference, b"")
+                with patch("checks.baseline", return_value=expected), patch("checks.policy", return_value=observed), self.assertRaises((Failure, OSError)):
+                    checks.policy_gate(self.ctx)
+                if p.is_symlink(): p.unlink()
+
+    @logged
+    def test_policy_other_hashes_remain_strict(self):
+        _, expected, observed = self.policy_fixture()
+        for key in ("FW_PERMANENT_SHA", "NFT_MULLVAD_SHA"):
+            with self.subTest(key=key), patch("checks.baseline", return_value=expected), patch("checks.policy", return_value=dict(observed, **{key:"3"*64})), self.assertRaises(Failure):
+                checks.policy_gate(self.ctx)
+
+    @logged
+    def test_policy_display_malformed_rejected(self):
+        reference, _, _ = self.policy_fixture()
+        bad = (b"", reference[:-1], reference + b"\x00\n", reference.replace(b"\n", b"\r\n"),
+               reference.replace(b"  rich rules: \n", b""), reference + b"  rich rules: \n",
+               reference + b"\trule \taccept\n", reference + b"\trule accept\n"*257,
+               b"x"*65537 + b"\n")
+        for value in bad:
+            with self.subTest(length=len(value)), self.assertRaises(Failure): checks.runtime_display(value)
+
+    @logged
+    def relay_fixture(self, current=None):
+        reference = (b'table inet mullvad {\n\tchain prerouting {\n'
+                     b'\t\tip saddr 8.8.8.8 udp sport 443 meta mark set 0x6d6f6c65\n\t}\n'
+                     b'\tchain output {\n'
+                     b'\t\tip daddr 8.8.8.8 udp dport 443 meta mark 0x6d6f6c65 accept\n\t}\n'
+                     b'\tchain input {\n'
+                     b'\t\tip saddr 8.8.8.8 udp sport 443 ct state established accept\n\t}\n}\n')
+        current = current if current is not None else reference.replace(b'8.8.8.8', b'1.1.1.1')
+        _, expected, observed = self.policy_fixture()
+        expected['NFT_MULLVAD_SHA'] = digest(reference)
+        observed['NFT_MULLVAD_SHA'] = digest(current)
+        atomic(self.paths.etc/'baseline-nft-mullvad.txt', reference)
+        status = {'state':'connected', 'details':{'endpoint':{
+            'protocol':'udp', 'tunnel_interface':'wg0-mullvad', 'obfuscation':{'Single':{
+                'obfuscation_type':'Quic', 'endpoint':{'address':'1.1.1.1:443', 'protocol':'udp'}}}}}}
+        self.relay_table = current
+        self.relay_statuses = [json.dumps(status).encode()]*2
+        self.relay_calls = []
+        original = self.ctx.runner
+
+        @logged
+        def response(argv, **kw):
+            if argv == ['/usr/bin/mullvad', 'status', '--json']:
+                self.relay_calls.append('status')
+                return subprocess.CompletedProcess(argv, 0, self.relay_statuses.pop(0), b'')
+            if argv == ['/usr/sbin/nft', 'list', 'table', 'inet', 'mullvad']:
+                self.relay_calls.append('table')
+                return subprocess.CompletedProcess(argv, 0, self.relay_table, b'')
+            return original(argv, **kw)
+        self.ctx.runner = response
+        return reference, current, expected, observed
+
+    @logged
+    def test_policy_legacy_anchored_quic_endpoint_only(self):
+        reference, _, expected, observed = self.relay_fixture()
+        with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed):
+            checks.policy_gate(self.ctx)
+        self.assertEqual(self.relay_calls, ['status','table','status'])
+        self.assertEqual(read_regular(self.paths.etc/'baseline-nft-mullvad.txt'), reference)
+        _, _, expected, observed = self.relay_fixture()
+        runtime = read_regular(self.paths.etc/'baseline-runtime-public.txt')
+        prefix, rules = runtime.split(b'  rich rules: \n')
+        permuted = prefix+b'  rich rules: \n'+b''.join(reversed(rules.splitlines(keepends=True)))
+        observed['FW_RUNTIME_SHA'] = digest(permuted)
+        original = self.ctx.runner
+
+        @logged
+        def both(argv, **kw):
+            if argv == ['/usr/bin/firewall-cmd', '--zone=public', '--list-all']:
+                return subprocess.CompletedProcess(argv, 0, permuted, b'')
+            return original(argv, **kw)
+        self.ctx.runner = both
+        with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed):
+            checks.policy_gate(self.ctx)
+
+    @logged
+    def test_policy_quic_rule_mutations_rejected(self):
+        _, current, _, _ = self.relay_fixture()
+        mutations = (current.replace(b'dport 443', b'dport 444'),
+                     current.replace(b'0x6d6f6c65', b'0x6d6f6c66'),
+                     current.replace(b' accept', b' drop'),
+                     current.replace(b'1.1.1.1', b'8.8.8.8', 1),
+                     current.replace(b'1.1.1.1', b'9.9.9.9'),
+                     current.replace(b'ct state established', b'ct state new,established'),
+                     current.replace(b'\t}\n}', b'\t\ttcp dport 22 accept\n\t}\n}'),
+                     b'\n'.join(reversed(current.splitlines()))+b'\n')
+        for value in mutations:
+            with self.subTest(mutation=digest(value)):
+                _, _, expected, observed = self.relay_fixture(value)
+                with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed), self.assertRaises(Failure):
+                    checks.policy_gate(self.ctx)
+
+    @logged
+    def test_policy_quic_reference_custody_rejected(self):
+        for state in ('missing','symlink','wrong_hash','untrusted','fifo'):
+            with self.subTest(state=state):
+                _, current, expected, observed = self.relay_fixture()
+                path = self.paths.etc/'baseline-nft-mullvad.txt'
+                if state == 'missing': path.unlink()
+                elif state == 'symlink': path.unlink(); path.symlink_to(self.paths.etc/'mode')
+                elif state == 'wrong_hash': atomic(path, current)
+                elif state == 'fifo': path.unlink(); os.mkfifo(path)
+                else: self.ctx.require_root = True
+                with patch('checks.trusted', side_effect=Failure('untrusted_deployment_path')) if state == 'untrusted' else contextlib.nullcontext():
+                    with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed), self.assertRaises(Failure):
+                        checks.policy_gate(self.ctx)
+                self.ctx.require_root = False
+                if path.is_symlink() or state == 'fifo': path.unlink()
+
+    @logged
+    def test_policy_quic_snapshot_and_daemon_races_rejected(self):
+        for state in ('table','endpoint','disconnect'):
+            with self.subTest(state=state):
+                _, _, expected, observed = self.relay_fixture()
+                if state == 'table': self.relay_table += b'\n'
+                elif state == 'endpoint': self.relay_statuses[1] = self.relay_statuses[1].replace(b'1.1.1.1', b'9.9.9.9')
+                else: self.relay_statuses[1] = b'{"state":"disconnected"}'
+                with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed), self.assertRaises(Failure):
+                    checks.policy_gate(self.ctx)
+
+    @logged
+    def test_policy_quic_status_is_strict_and_bounded(self):
+        self.relay_fixture()
+        valid = self.relay_statuses[0]
+        self.assertEqual(checks.quic_relay(valid), b'1.1.1.1')
+        invalid = (b'', b'null', b'[]', b'{}', b'x'*65537, b'{',
+                   valid.replace(b'connected', b'disconnected'), valid.replace(b'udp', b'tcp'),
+                   valid.replace(b'wg0-mullvad', b'other'), valid.replace(b'Quic', b'Udp2Tcp'),
+                   valid.replace(b'1.1.1.1:443', b'1.1.1.1:444'), valid.replace(b'1.1.1.1', b'127.0.0.1'),
+                   valid.replace(b'1.1.1.1:443', b'[2001:4860:4860::8888]:443'),
+                   valid.replace(b'1.1.1.1', b'relay.example'), valid.replace(b'1.1.1.1', b'01.1.1.1'),
+                   valid.replace(b'"Single": {', b'"Other": {}, "Single": {'))
+        for value in invalid:
+            with self.subTest(length=len(value)), self.assertRaises(Failure): checks.quic_relay(value)
+
+    @logged
+    def test_policy_quic_reference_grammar_and_display_rejected(self):
+        reference, current, _, _ = self.relay_fixture()
+        bad_reference = (reference.replace(b'dport 443', b'dport 444'),
+                         reference.replace(b'8.8.8.8', b'9.9.9.9', 1),
+                         reference + b'#8.8.8.8\n', reference + reference,
+                         reference.replace(b'8.8.8.8', b'999.8.8.8'))
+        for value in bad_reference:
+            with self.subTest(reference=digest(value)), self.assertRaises(Failure):
+                checks.relay_display(value, current, b'1.1.1.1')
+        for value in (b'', current[:-1], current+b'\x00\n', b'x'*65537+b'\n'):
+            with self.subTest(length=len(value)), self.assertRaises(Failure):
+                checks.relay_display(reference, value, b'1.1.1.1')
+
+    @logged
+    def test_policy_quic_logger_never_records_daemon_payload(self):
+        _, _, expected, observed = self.relay_fixture()
+        self.relay_statuses = [p.replace(b'"state":', b'"secret_sentinel":"SECRET_DO_NOT_LOG", "state":') for p in self.relay_statuses]
+        with patch('core.event') as trace, patch('checks.event') as states, patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed):
+            checks.policy_gate(self.ctx)
+        messages = str(trace.call_args_list)+str(states.call_args_list)
+        self.assertNotIn('SECRET_DO_NOT_LOG', messages)
+        self.assertNotIn('1.1.1.1', messages)
+        self.assertIn('legacy_anchored_local_quic_relay_only', messages)
+
+    @logged
     def test_peer_bad_inputs(self):
         for uri in (URI.replace("192.0.2.1", "999.0.2.1"), URI.replace("192.0.2.1", "host.example"),
                     URI.replace(":443", ":99999"), URI+"&key="+PIN, URI+"&bad", URI+"&evil=1",

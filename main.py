@@ -31,6 +31,10 @@ Recovery: snapshot, diff [file], backup [--full --recipient FINGERPRINT],
           restore FILE [--apply], doctor
 Research: research capture|map [ID]|diff [earlier ID]|report [1..72 hours]
           Local observations + history only; global size/capacity UNKNOWN.
+Atlas: atlas catalogue|new|crawl [1..120 minutes]|status|report
+  crawl without a duration completes the discovered frontier; duration saves one slice.
+       Whole public catalogue + resumable discovered-key frontier, no32-key cutoff.
+       Remote lists may truncate; geography is a claim, NOT world completeness.
 Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
          nodeinfo KEY, whois KEY, debug-remote self|peers|tree KEY,
          survey, traceroute KEY (tree inspection, NOT packet route), discover
@@ -125,6 +129,8 @@ def selftest(ctx, offline=False):
         run_suite()
         from research.tests import run_suite as research_suite
         research_suite()
+        from atlas.tests import run_suite as atlas_suite
+        atlas_suite()
         return
     checks.check(ctx)
     for method in ("getSelf", "getTree", "getPaths", "getSessions"):
@@ -211,6 +217,9 @@ def dispatch(ctx, args):
     elif cmd == "research":
         import research
         output(research.command(ctx, a))
+    elif cmd == "atlas":
+        import atlas
+        output(atlas.command(ctx, a))
     elif cmd in ("logs", "events"):
         n = bounded_number(a[0], 1, 1000) if a else 50
         command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-n", str(n)]

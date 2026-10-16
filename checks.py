@@ -1,11 +1,12 @@
 """Fail-closed structured health checks, including PID-bound underlay proof."""
 from pathlib import Path
+import ipaddress
 import json
 import re
 import stat
 import time
 
-from core import (Failure, NODE, STACK, TIMER, KEYS, read_regular, logged,
+from core import (Failure, NODE, STACK, TIMER, KEYS, read_regular, logged, event,
                   digest, safe_config, endpoint)
 
 
@@ -85,7 +86,11 @@ def integrity(ctx):
                      ctx.p.runtime / "management.py", ctx.p.runtime / "telemetry.py", ctx.p.runtime / "recovery.py",
                      ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
                      ctx.p.etc / "mode", ctx.p.etc / "baseline.env"}
+        required.add(ctx.p.etc / "baseline-runtime-public.txt")
+        required.add(ctx.p.etc / "baseline-nft-mullvad.txt")
         required |= {ctx.p.runtime / "research" / n for n in ("__init__.py", "model.py", "metrics.py", "tests.py")}
+        required |= {ctx.p.runtime / "atlas" / n for n in ("__init__.py", "store.py", "protocol.py", "catalogue.py",
+                                                            "acquisition.py", "analysis.py", "viewer.py", "tests.py")}
     if not required <= checked: raise Failure("integrity_coverage_incomplete")
     return len(checked)
 
@@ -202,9 +207,128 @@ def tun_gate(ctx):
 
 
 @logged
+def runtime_display(data):
+    """Normalize ONLY the unordered trailing rich-rule display, never nft order.
+
+    All zone fields and every rule byte stay significant. This is not a policy
+    parser: unsupported formatting, duplicates or control bytes fail closed.
+    """
+    marker = b"  rich rules: \n"
+    if (not isinstance(data, bytes) or len(data) > 65536 or not data.endswith(b"\n")
+            or data.count(marker) != 1 or any(c < 32 and c not in (9, 10) for c in data)
+            or b"\x7f" in data):
+        raise Failure("invalid_runtime_display")
+    prefix, tail = data.split(marker)
+    rules = tail.splitlines(keepends=True)
+    if (len(rules) > 256 or len(rules) != len(set(rules))
+            or any(not r.startswith(b"\trule ") or not r.endswith(b"\n")
+                   or b"\t" in r[1:] for r in rules)):
+        raise Failure("invalid_runtime_rich_rules")
+    return prefix + marker + b"".join(sorted(rules))
+
+
+@logged
+def quic_relay(data):
+    """Only the connected local daemon's supported IPv4/UDP443 QUIC endpoint."""
+    if not isinstance(data, bytes) or len(data) > 65536:
+        raise Failure("invalid_mullvad_status")
+    try:
+        status = json.loads(data)
+        tunnel = status["details"]["endpoint"]
+        obfuscation = tunnel["obfuscation"]
+        single = obfuscation["Single"]
+        relay = single["endpoint"]
+        address = relay["address"]
+        if (status["state"] != "connected" or tunnel["protocol"] != "udp"
+                or tunnel["tunnel_interface"] != "wg0-mullvad"
+                or set(obfuscation) != {"Single"}
+                or single["obfuscation_type"] != "Quic" or relay["protocol"] != "udp"
+                or not isinstance(address, str) or not address.endswith(":443")):
+            raise ValueError
+        ip = ipaddress.IPv4Address(address[:-4])
+        if not ip.is_global or address != f"{ip}:443": raise ValueError
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise Failure("unsupported_mullvad_relay_status") from None
+    return str(ip).encode("ascii")
+
+
+@logged
+def relay_display(reference, current, relay):
+    """Replace ONLY three reviewed endpoint slots; every other byte stays exact.
+
+    No nft parsing/canonicalization: order, ports, marks, interfaces and verdicts
+    remain significant. The caller must first anchor reference to the old SHA.
+    """
+    for data in (reference, current):
+        if (not isinstance(data, bytes) or len(data) > 65536 or not data.endswith(b"\n")
+                or any(c < 32 and c not in (9, 10) for c in data) or b"\x7f" in data):
+            raise Failure("invalid_mullvad_display")
+    slots = ((b"ip saddr ", b" udp sport 443 meta mark set 0x6d6f6c65"),
+             (b"ip daddr ", b" udp dport 443 meta mark 0x6d6f6c65 accept"),
+             (b"ip saddr ", b" udp sport 443 ct state established accept"))
+    addresses = []
+    for prefix, suffix in slots:
+        pattern = b"^\\t\\t" + re.escape(prefix) + rb"([0-9.]+)" + re.escape(suffix) + b"\\n"
+        matches = re.findall(pattern, reference, re.MULTILINE)
+        if len(matches) != 1: raise Failure("unsupported_mullvad_reference_slots")
+        addresses.extend(matches)
+    old = addresses[0]
+    if len(set(addresses)) != 1 or reference.count(old) != 3:
+        raise Failure("unsupported_mullvad_reference_slots")
+    try:
+        if str(ipaddress.IPv4Address(old.decode("ascii"))).encode("ascii") != old:
+            raise ValueError
+        if str(ipaddress.IPv4Address(relay.decode("ascii"))).encode("ascii") != relay:
+            raise ValueError
+    except (ValueError, UnicodeError, AttributeError):
+        raise Failure("invalid_mullvad_relay_address") from None
+    return reference.replace(old, relay) == current
+
+
+@logged
+def nft_relay_gate(ctx, expected, observed):
+    path = ctx.p.etc / "baseline-nft-mullvad.txt"
+    if ctx.require_root: trusted(path)
+    try:
+        reference = read_regular(path, limit=65536)
+    except OSError:
+        raise Failure("mullvad_reference_unavailable") from None
+    if digest(reference) != expected:
+        raise Failure("mullvad_reference_not_accepted_baseline")
+    relay = quic_relay(ctx.run(["/usr/bin/mullvad", "status", "--json"]).stdout)
+    current = ctx.run(["/usr/sbin/nft", "list", "table", "inet", "mullvad"]).stdout
+    if digest(current) != observed:
+        raise Failure("mullvad_display_changed_during_check")
+    if not relay_display(reference, current, relay):
+        raise Failure("policy_baseline_drift_do_not_auto_accept")
+    if quic_relay(ctx.run(["/usr/bin/mullvad", "status", "--json"]).stdout) != relay:
+        raise Failure("mullvad_relay_changed_during_check")
+    event("state", "mullvad_policy", "legacy_anchored_local_quic_relay_only")
+
+
+@logged
 def policy_gate(ctx):
     expected = baseline(ctx)
-    if any(v != expected[k] for k, v in policy(ctx).items()): raise Failure("policy_baseline_drift_do_not_auto_accept")
+    observed = policy(ctx)
+    if observed["FW_PERMANENT_SHA"] != expected["FW_PERMANENT_SHA"]:
+        raise Failure("policy_baseline_drift_do_not_auto_accept")
+    if observed["NFT_MULLVAD_SHA"] != expected["NFT_MULLVAD_SHA"]:
+        nft_relay_gate(ctx, expected["NFT_MULLVAD_SHA"], observed["NFT_MULLVAD_SHA"])
+    if observed["FW_RUNTIME_SHA"] == expected["FW_RUNTIME_SHA"]:
+        event("state", "runtime_policy", "exact_legacy_hash")
+        return
+    # Legacy SHA is authoritative; never enroll a current observation as accepted.
+    path = ctx.p.etc / "baseline-runtime-public.txt"
+    if ctx.require_root: trusted(path)
+    reference = read_regular(path, limit=65536)
+    if digest(reference) != expected["FW_RUNTIME_SHA"]:
+        raise Failure("runtime_reference_not_accepted_baseline")
+    current = ctx.run(["/usr/bin/firewall-cmd", "--zone=public", "--list-all"]).stdout
+    if digest(current) != observed["FW_RUNTIME_SHA"]:
+        raise Failure("runtime_display_changed_during_check")
+    if runtime_display(reference) != runtime_display(current):
+        raise Failure("policy_baseline_drift_do_not_auto_accept")
+    event("state", "runtime_policy", "legacy_anchored_rule_permutation")
 
 
 @logged

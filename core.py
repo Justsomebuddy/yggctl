@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.1.0"
+VERSION = "5.2.1"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
