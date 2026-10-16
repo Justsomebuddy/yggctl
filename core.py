@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.5.0"
+VERSION = "5.5.1"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
@@ -44,7 +44,7 @@ TRACE_KEEP = 400
 _ROUTINE = frozenset({"entry", "exit", "external_start", "external_exit"})
 _ROUTINE_STATE = frozenset({"mutation_lock"})
 _trace_lock = threading.Lock()
-_trace = {"live": False, "held": 0, "lines": collections.deque(maxlen=TRACE_KEEP)}
+_trace = {"live": False, "quiet": False, "held": 0, "lines": collections.deque(maxlen=TRACE_KEEP)}
 
 
 def event(kind, label, result=""):
@@ -52,7 +52,7 @@ def event(kind, label, result=""):
     line = f"yggctl {kind} {label} {result}"[:256]
     routine = kind in _ROUTINE or (kind == "state" and label in _ROUTINE_STATE)
     with _trace_lock:
-        if routine and not _trace["live"]:
+        if (routine or _trace["quiet"]) and not _trace["live"]:
             _trace["held"] += 1
             _trace["lines"].append(line)
             return
@@ -62,6 +62,13 @@ def event(kind, label, result=""):
 def trace_is_live():
     with _trace_lock:
         return _trace["live"]
+
+
+def trace_quiet(enabled=True):
+    """Offline selftest: hold every event, the expected errors of negative tests included;
+    they reach syslog only if the run fails."""
+    with _trace_lock:
+        _trace["quiet"] = enabled
 
 
 def trace_live():

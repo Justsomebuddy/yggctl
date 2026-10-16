@@ -712,6 +712,9 @@ class ConsoleTests(unittest.TestCase):
     @logged
     def test_errors_alerts_and_state_changes_are_written_at_once(self):
         import core
+        quiet = core._trace["quiet"]
+        core.trace_quiet(False)
+        self.addCleanup(core.trace_quiet, quiet)
         with patch("core.syslog.syslog") as sink:
             core.finish_run("reset", 0)
             sink.reset_mock()
@@ -739,6 +742,24 @@ class ConsoleTests(unittest.TestCase):
                 core._trace["live"] = False
             core.finish_run("status", 0)
         self.assertEqual(sink.call_args_list[-1].args[1], "yggctl run status status=0 traced=1")
+
+    @logged
+    def test_quiet_mode_holds_expected_errors_until_failure(self):
+        import core
+        quiet = core._trace["quiet"]
+        core.trace_quiet(True)
+        self.addCleanup(core.trace_quiet, quiet)
+        with patch("core.syslog.syslog") as sink:
+            core.finish_run("reset", 0)
+            sink.reset_mock()
+            core.event("error", "probe", "Failure")
+            core.finish_run("selftest", 0)
+            self.assertEqual([c.args[1] for c in sink.call_args_list], ["yggctl run selftest status=0 traced=1"])
+            sink.reset_mock()
+            core.event("error", "probe", "Failure")
+            core.finish_run("selftest", 1)
+        self.assertEqual([c.args[1] for c in sink.call_args_list],
+                         ["yggctl error probe Failure", "yggctl run selftest status=1 traced=1"])
 
     @logged
     def test_held_trace_is_bounded(self):
@@ -929,10 +950,10 @@ class ConsoleTests(unittest.TestCase):
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.settimeout(10)  # generous under load; a rejection is immediate
                 client.connect(str(served.path))
-                client.sendall(b'{"call":"metrics"}\n')
                 try:
+                    client.sendall(b'{"call":"metrics"}\n')
                     reply = client.recv(10)
-                except ConnectionResetError:  # closed with the request still unread
+                except (BrokenPipeError, ConnectionResetError):  # rejected before or after the request
                     reply = b""
                 self.assertEqual(reply, b"")
                 client.close()
@@ -1022,6 +1043,9 @@ class ConsoleTests(unittest.TestCase):
 
 @logged
 def run_suite():
+    # Negative tests raise expected errors; keep them out of syslog unless the run fails.
+    import core
+    core.trace_quiet()
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(ConsoleTests)
     print(f"[1/1] offline regressions total={suite.countTestCases()} remaining={suite.countTestCases()}")
     start=time.monotonic()
