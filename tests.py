@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tarfile
@@ -807,23 +808,27 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "")
 
     @logged
-    def test_sandbox_command_drops_privileges_and_hides_keys(self):
+    def test_sandbox_command_runs_as_worker_without_keys(self):
         import sandbox
-        unit, argv = sandbox.command("research", ["report", "1"], "/usr/local/libexec/yggdrasil-lab/main.py")
-        self.assertTrue(unit.startswith("yggctl-sandbox-research-") and unit.endswith(".service"))
+        unit, argv = sandbox.command("research", "research", ["report", "1"],
+                                     "/usr/local/libexec/yggdrasil-lab/main.py", "1a2b3c4d")
+        self.assertEqual(unit, "yggctl-sandbox-research-1a2b3c4d.service")
         props = [argv[i + 1] for i, v in enumerate(argv) if v == "-p"]
-        for required in ("NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectHome=yes",
-                         "TemporaryFileSystem=/etc/yggdrasil-lab:mode=0755", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
-                         "TemporaryFileSystem=/var/lib/yggdrasil-lab:mode=0755",
+        for required in ("User=ygglab-worker", "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict",
+                         "ProtectHome=yes", "InaccessiblePaths=/etc/yggdrasil-lab", "PrivateNetwork=yes",
+                         "RestrictAddressFamilies=AF_UNIX", "TemporaryFileSystem=/var/lib/yggdrasil-lab:mode=0755",
                          "BindPaths=/var/lib/yggdrasil-lab/research"):
             self.assertIn(required, props)
         self.assertEqual(argv[argv.index("--") + 1:], ["/usr/bin/python3", "-I", "-B",
                          "/usr/local/libexec/yggdrasil-lab/main.py", "research", "report", "1"])
-        _, atlas_argv = sandbox.command("atlas", ["status"], "/m.py", trace=True)
-        atlas_props = [atlas_argv[i + 1] for i, v in enumerate(atlas_argv) if v == "-p"]
-        self.assertNotIn("PrivateNetwork=yes", atlas_props)
-        self.assertIn("BindPaths=/var/lib/yggdrasil-lab/atlas", atlas_props)
-        self.assertEqual(atlas_argv[-3:], ["--trace", "atlas", "status"])
+        _, remote = sandbox.command("remote", "ping", ["[200::1]:80"], "/m.py", "00000000", trace=True)
+        remote_props = [remote[i + 1] for i, v in enumerate(remote) if v == "-p"]
+        self.assertIn("IPAddressDeny=any", remote_props)
+        self.assertIn("IPAddressAllow=localhost", remote_props)
+        self.assertNotIn("BindPaths=/var/lib/yggdrasil-lab/research", remote_props)
+        self.assertEqual(remote[-3:], ["--trace", "ping", "[200::1]:80"])
+        self.assertEqual({sandbox.ROLE_OF[c] for c in ("ping", "bench", "socks-test", "nodeinfo", "whois",
+                                                        "debug-remote", "survey", "traceroute")}, {"remote"})
         with self.assertRaises(ValueError):
             sandbox.properties("checks")
 
@@ -834,28 +839,179 @@ class ConsoleTests(unittest.TestCase):
             inside, outside = Path(d) / "inside", Path(d) / "outside"
             inside.write_text("0::/system.slice/yggctl-sandbox-atlas-1a2b3c4d.service\n")
             outside.write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+            self.assertEqual(sandbox.own_unit(str(inside)), ("atlas", "1a2b3c4d"))
             self.assertTrue(sandbox.inside(str(inside)))
             self.assertFalse(sandbox.inside(str(outside)))
             self.assertFalse(sandbox.inside(str(Path(d) / "missing")))
 
     @logged
-    def test_live_paths_run_research_and_atlas_in_sandbox(self):
-        calls = []
-        def attached(argv, stop):
-            calls.append((argv, stop))
-            return 3 if argv[-1] == "status" else 0
-        ctx = Context(Paths(), self.ctx.runner, require_root=False, attached=attached)
-        args = main.argparse.Namespace(command="research", args=["report", "1"], apply=False, force=False,
-                                       full=False, recipient=None)
-        with patch("sandbox.inside", return_value=False):
-            main.dispatch(ctx, args)
-            argv, stop = calls[-1]
-            self.assertEqual(argv[0], "/usr/bin/systemd-run")
-            self.assertEqual(argv[-3:], ["research", "report", "1"])
-            self.assertEqual(stop[:2], ["/usr/bin/systemctl", "stop"])
-            args.command, args.args = "atlas", ["status"]
+    def test_live_paths_route_sandboxed_commands(self):
+        import sandbox
+        seen = []
+        def fake_run(ctx, cmd, args, main_path):
+            seen.append((cmd, args))
+            return 3 if cmd == "atlas" else 0
+        ctx = Context(Paths(), self.ctx.runner, require_root=False)
+        def ns(command, *a):
+            return main.argparse.Namespace(command=command, args=list(a), apply=False, force=False,
+                                           full=False, recipient=None)
+        with patch("sandbox.inside", return_value=False), patch("sandbox.run", side_effect=fake_run):
+            for command, *a in (("research", "report", "1"), ("ping", "[200::1]:80"), ("nodeinfo", PIN),
+                                ("survey",), ("bench",), ("socks-test",)):
+                main.dispatch(ctx, ns(command, *a))
             with self.assertRaisesRegex(Failure, "sandboxed_atlas_failed:rc=3"):
-                main.dispatch(ctx, args)
+                main.dispatch(ctx, ns("atlas", "status"))
+        self.assertEqual([c for c, _ in seen], ["research", "ping", "nodeinfo", "survey", "bench", "socks-test", "atlas"])
+
+    @logged
+    def test_sandbox_parent_checks_before_worker(self):
+        import sandbox
+        steps = []
+        class FakeBroker:
+            unit_id = "0badc0de"
+            def __init__(self, ctx, role): steps.append(("broker", role))
+            def __enter__(self): return self
+            def __exit__(self, *exc): steps.append(("broker_closed",))
+        def attached(argv, stop):
+            steps.append(("worker", argv[-1], self.ctx.lock_depth > 0))
+            return 0
+        self.ctx.attached = attached
+        with patch("sandbox.broker.Broker", FakeBroker), \
+                patch("sandbox.checks.integrity", side_effect=lambda ctx: steps.append(("integrity",))), \
+                patch("sandbox.checks.sockets", side_effect=lambda ctx: steps.append(("sockets",))):
+            self.assertEqual(sandbox.run(self.ctx, "research", ["report"], "/m.py"), 0)
+            self.assertEqual(sandbox.run(self.ctx, "bench", [], "/m.py"), 0)
+            self.assertEqual(sandbox.run(self.ctx, "atlas", ["status"], "/m.py"), 0)
+        self.assertEqual(steps, [
+            ("integrity",), ("broker", "research"), ("worker", "report", True), ("broker_closed",),
+            ("sockets",), ("broker", "remote"), ("worker", "bench", False), ("broker_closed",),
+            ("integrity",), ("broker", "atlas"), ("worker", "status", False), ("broker_closed",)])
+
+    @logged
+    def test_broker_serves_only_allowlisted_reads(self):
+        import base64, broker, checks as checks_module
+        calls = []
+        def runner(argv, **kw):
+            calls.append(list(argv))
+            body = {"key": PIN, "method": argv[3]}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(body).encode(), b"")
+        parent = Context(self.paths, runner, require_root=False)
+        atomic(self.paths.state / "metrics.jsonl", '{"ts":"x"}\n')
+        with tempfile.TemporaryDirectory() as d, broker.Broker(parent, "research", uid=os.getuid(),
+                                                                directory=Path(d)) as served:
+            worker = broker.WorkerContext(served.path, paths=self.paths)
+            self.assertEqual(worker.api("getSelf")["method"], "getSelf")
+            r = worker.run([str(self.paths.ctl), "-json", f"-endpoint=unix://{self.paths.node_sock}",
+                            "debug_remotegetpeers", "key=" + PIN])
+            self.assertEqual(json.loads(r.stdout)["method"], "debug_remotegetpeers")
+            self.assertEqual(worker.read_state("metrics.jsonl", 1024), b'{"ts":"x"}\n')
+            for bad in (["addPeer", "uri=tls://192.0.2.1:443"], ["debug_remotegetpeers", "key=" + "z" * 64],
+                        ["getself", "extra=1"]):
+                with self.assertRaisesRegex(Failure, "broker_call_not_allowed"):
+                    worker.run([str(self.paths.ctl), "-json", f"-endpoint=unix://{self.paths.node_sock}", *bad])
+            with self.assertRaisesRegex(Failure, "broker_call_not_allowed"):
+                worker.api("getPeers", stack=True)
+            with self.assertRaisesRegex(Failure, "state_not_available_in_sandbox"):
+                worker.read_state("alerts.jsonl", 1024)
+            self.assertEqual(checks_module.integrity(worker), 0)
+            worker.root()
+            with worker.locked():
+                pass
+        self.assertEqual([c[3] for c in calls], ["getSelf", "debug_remotegetpeers"])
+
+    @logged
+    def test_broker_rejects_foreign_uid_and_metrics_for_other_roles(self):
+        import broker
+        parent = Context(self.paths, self.ctx.runner, require_root=False)
+        with tempfile.TemporaryDirectory() as d:
+            with broker.Broker(parent, "remote", uid=os.getuid(), directory=Path(d)) as served:
+                served.uid = os.getuid() + 1  # the broker now expects another worker uid
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(10)  # generous under load; a rejection is immediate
+                client.connect(str(served.path))
+                client.sendall(b'{"call":"metrics"}\n')
+                try:
+                    reply = client.recv(10)
+                except ConnectionResetError:  # closed with the request still unread
+                    reply = b""
+                self.assertEqual(reply, b"")
+                client.close()
+            with broker.Broker(parent, "remote", uid=os.getuid(), directory=Path(d)) as served:
+                worker = broker.WorkerContext(served.path, paths=self.paths)
+                with self.assertRaisesRegex(Failure, "broker_call_not_allowed"):
+                    worker.read_state("metrics.jsonl", 1024)
+
+    @logged
+    def test_peer_alerts_after_ten_minutes_and_on_recovery(self):
+        import datetime as dt
+        start = dt.datetime(2026, 10, 16, 12, 0, tzinfo=dt.timezone.utc)
+        def sample(minute, up):
+            return {"ts": (start + dt.timedelta(minutes=minute)).isoformat(),
+                    "peers": [{"r": URI, "up": up}, {"r": "tls://192.0.2.2:443", "up": True}]}
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(0, False)), [])
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(5, False)), [])
+        state = self.paths.state / "alert-state.json"
+        inode = state.stat().st_ino
+        down = telemetry.peer_alerts(self.ctx, sample(10, False))
+        self.assertEqual(down, [{"kind": "ygg-peer-down", "peer": URI, "minutes": 10, "up": 1, "total": 2}])
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(11, False)), [])
+        self.assertNotEqual(state.stat().st_ino, inode)
+        inode = state.stat().st_ino
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(12, False)), [])
+        self.assertEqual(state.stat().st_ino, inode)
+        up = telemetry.peer_alerts(self.ctx, sample(20, True))
+        self.assertEqual(up, [{"kind": "ygg-peer-up", "peer": URI, "minutes": 20, "up": 2, "total": 2}])
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(21, False)), [])
+        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(25, True)), [])
+
+    @logged
+    def test_alerts_forward_once_and_retry_failures(self):
+        sent, rc = [], [0]
+        def runner(argv, **kw):
+            if argv[0] == telemetry.SENDER:
+                sent.append(json.loads(kw["input"]))
+                return subprocess.CompletedProcess(argv, rc[0], b"", b"")
+            return self.ctx.runner(argv, **kw)
+        ctx = Context(self.paths, runner, require_root=False)
+        telemetry.append(ctx, "alerts.jsonl", {"ts": "t0", "kind": "ygg-health", "errors": ["node_inactive"]}, 1000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            telemetry.forward(ctx)
+            self.assertEqual(sent, [])
+            telemetry.append(ctx, "alerts.jsonl", {"ts": "t1", "id": "a1", "kind": "ygg-peer-down", "peer": URI,
+                                                   "minutes": 12, "up": 5, "total": 6}, 1000)
+            rc[0] = 75
+            with self.assertRaisesRegex(Failure, "alert_forward_failed:count=1"):
+                telemetry.forward(ctx)
+            rc[0] = 0
+            telemetry.forward(ctx)
+            telemetry.forward(ctx)
+        self.assertEqual(len(sent), 2)
+        message = sent[-1]
+        self.assertEqual((message["rule"], message["priority"], message["source"]),
+                         ("Yggdrasil: пир недоступен", "Warning", "yggctl"))
+        self.assertIn(URI, message["output"])
+        self.assertIn("12 мин", message["output"])
+        self.assertLessEqual(len(message["output"]), 300)
+
+    @logged
+    def test_dispatch_table_rules(self):
+        def ns(command, *a, **flags):
+            values = {"apply": False, "force": False, "full": False, "recipient": None, **flags}
+            return main.argparse.Namespace(command=command, args=list(a), **values)
+        for args, label in ((ns("check", "x"), "unexpected_arguments"), (ns("watch", "1", "2", "3"), "unexpected_arguments"),
+                            (ns("check", apply=True), "apply_not_supported_here"),
+                            (ns("remove-peer", "x", force=True), "force_only_for_add_peer"),
+                            (ns("check", full=True), "backup_options_only"),
+                            (ns("purge"), "legacy_high_risk_operation_disabled"),
+                            (ns("no-such-command"), "unknown_command_use_help")):
+            with self.assertRaisesRegex(Failure, label):
+                main.dispatch(self.ctx, args)
+        nonroot = Context(self.paths, self.ctx.runner, require_root=True)
+        with patch("core.os.geteuid", return_value=1000):
+            with self.assertRaisesRegex(Failure, "root_required"):
+                main.dispatch(nonroot, ns("no-such-command"))
+        for word in ("peers", "alerts-forward", "survey", "atlas", "notify"):
+            self.assertIn(word, main.COMMANDS)
 
     @logged
     def test_attached_process_returns_child_status(self):

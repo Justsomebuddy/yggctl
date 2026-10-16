@@ -15,7 +15,8 @@ from management import transaction, restart_pair
 @logged
 def members(ctx, full=False):
     result = {"config/" + name: read_regular(ctx.p.etc / name) for name in FILES}
-    result.update({"units/" + name: read_regular(ctx.p.units / name) for name in (NODE, STACK, TIMER, "ygg-metrics.service")})
+    units = (NODE, STACK, TIMER, "ygg-metrics.service")
+    result.update({"units/" + name: read_regular(ctx.p.units / name) for name in units})
     for name in ("yggdrasil-lab.conf", "yggstack.conf"):
         if safe_config(ctx.config(name)): raise Failure("unsafe_config_backup_refused")
     if full: result.update({"keys/" + name: read_regular(ctx.p.etc / name, 4096) for name in KEYS})
@@ -47,10 +48,13 @@ def backup(ctx, full=False, recipient=None):
         data = archive(members(ctx, full), full)
         if full:
             # User-provided complete fingerprint; never choose a package/vendor key.
-            key = ctx.run(["/usr/bin/gpg", "--batch", "--with-colons", "--fingerprint", "--list-keys", recipient]).stdout.decode()
-            if not any(line.startswith("fpr:") and line.split(":")[9].lower() == recipient.lower() for line in key.splitlines()):
+            key = ctx.run(["/usr/bin/gpg", "--batch", "--with-colons", "--fingerprint", "--list-keys",
+                           recipient]).stdout.decode()
+            fingerprints = [line.split(":")[9].lower() for line in key.splitlines() if line.startswith("fpr:")]
+            if recipient.lower() not in fingerprints:
                 raise Failure("recipient_fingerprint_not_found")
-            data = ctx.run(["/usr/bin/gpg", "--batch", "--yes", "--trust-model", "always", "--encrypt", "--recipient", recipient], input=data, timeout=30).stdout
+            data = ctx.run(["/usr/bin/gpg", "--batch", "--yes", "--trust-model", "always", "--encrypt",
+                            "--recipient", recipient], input=data, timeout=30).stdout
         folder = ctx.p.state / "backups"
         folder.mkdir(mode=0o700, exist_ok=True)
         if folder.is_symlink() or folder.stat().st_mode & 0o077: raise Failure("backup_directory_not_private")
@@ -65,7 +69,8 @@ def backup(ctx, full=False, recipient=None):
 @logged
 def inspect_archive(data):
     if len(data) > 4 * 1024 * 1024: raise Failure("backup_size_limit")
-    allowed = {"config/" + n for n in FILES} | {"units/" + n for n in (NODE, STACK, TIMER, "ygg-metrics.service")} | {"keys/" + n for n in KEYS} | {"manifest.json"}
+    allowed = ({"config/" + n for n in FILES} | {"units/" + n for n in (NODE, STACK, TIMER, "ygg-metrics.service")}
+               | {"keys/" + n for n in KEYS} | {"manifest.json"})
     files = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
@@ -81,8 +86,10 @@ def inspect_archive(data):
                 or any(not isinstance(k, str) or not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{64}", v)
                        for k, v in manifest["sha256"].items())):
             raise Failure("invalid_backup_manifest_schema")
-        if manifest.get("schema") != 1 or set(manifest["sha256"]) != set(files): raise Failure("backup_manifest_mismatch")
-        if any(digest(value) != manifest["sha256"][name] for name, value in files.items()): raise Failure("backup_member_hash_mismatch")
+        if manifest.get("schema") != 1 or set(manifest["sha256"]) != set(files):
+            raise Failure("backup_manifest_mismatch")
+        if any(digest(value) != manifest["sha256"][name] for name, value in files.items()):
+            raise Failure("backup_member_hash_mismatch")
         base = allowed - {"manifest.json"} - {"keys/" + n for n in KEYS}
         if not base <= set(files): raise Failure("backup_members_missing")
         actual_keys = {k for k in files if k.startswith("keys/")}
@@ -110,7 +117,8 @@ def restore(ctx, path, apply=False):
         if updates[ctx.p.etc / "mode"].strip() != read_regular(ctx.p.etc / "mode").strip():
             raise Failure("restore_underlay_change_requires_separate_review")
         for n in (NODE, STACK, TIMER, "ygg-metrics.service"):
-            if files["units/" + n] != read_regular(ctx.p.units / n): raise Failure("restore_unit_change_requires_separate_review")
+            if files["units/" + n] != read_regular(ctx.p.units / n):
+                raise Failure("restore_unit_change_requires_separate_review")
         configs = []
         for name in ("yggdrasil-lab.conf", "yggstack.conf"):
             decoded = json.loads(ctx.run([ctx.p.decoder], input=updates[ctx.p.etc / name]).stdout)

@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.4.0"
+VERSION = "5.5.0"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
@@ -190,6 +190,9 @@ class Paths:
 
 
 class Context:
+    # Checks a root parent already ran for a sandboxed worker (see broker.WorkerContext).
+    parent_verified = frozenset()
+
     @logged
     def __init__(self, paths=None, runner=None, require_root=True, attached=None):
         self.p = paths or Paths()
@@ -225,6 +228,12 @@ class Context:
         return r
 
     @logged
+    def read_state(self, name, limit):
+        """Contents of one state file, or None when it does not exist."""
+        path = self.p.state / name
+        return read_regular(path, limit) if path.exists() else None
+
+    @logged
     def run_attached(self, argv, *, stop):
         executable = Path(argv[0]).name
         event("external_start", executable)
@@ -252,7 +261,8 @@ class Context:
 
     @logged
     def unit(self, unit):
-        r = self.run(["/usr/bin/systemctl", "show", unit, "--property=ActiveState,SubState,MainPID,NRestarts,UnitFileState,ExecMainStatus"])
+        r = self.run(["/usr/bin/systemctl", "show", unit,
+                      "--property=ActiveState,SubState,MainPID,NRestarts,UnitFileState,ExecMainStatus"])
         return dict(line.split("=", 1) for line in r.stdout.decode().splitlines() if "=" in line)
 
     @logged
@@ -430,7 +440,8 @@ def peer_uri(uri, force=False):
         raise Failure("invalid_priority")
     q["key"] = [q["key"][0].lower()]
     q.setdefault("maxbackoff", ["30s"])
-    canonical = urllib.parse.urlunsplit((u.scheme, f"{addr}:{port}", u.path, urllib.parse.urlencode(sorted((k,v[0]) for k,v in q.items())), ""))
+    query = urllib.parse.urlencode(sorted((k, v[0]) for k, v in q.items()))
+    canonical = urllib.parse.urlunsplit((u.scheme, f"{addr}:{port}", u.path, query, ""))
     return canonical, f"{addr}:{port}"
 
 

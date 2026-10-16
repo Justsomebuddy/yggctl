@@ -27,7 +27,8 @@ def peers(ctx, stack=False):
 def policy(ctx):
     return {
         "FW_RUNTIME_SHA": digest(ctx.run(["/usr/bin/firewall-cmd", "--zone=public", "--list-all"]).stdout),
-        "FW_PERMANENT_SHA": digest(ctx.run(["/usr/bin/firewall-cmd", "--permanent", "--zone=public", "--list-all"]).stdout),
+        "FW_PERMANENT_SHA": digest(ctx.run(["/usr/bin/firewall-cmd", "--permanent", "--zone=public",
+                                            "--list-all"]).stdout),
         "NFT_MULLVAD_SHA": digest(ctx.run(["/usr/sbin/nft", "list", "table", "inet", "mullvad"]).stdout),
     }
 
@@ -65,6 +66,8 @@ def trusted(path):
 
 @logged
 def integrity(ctx):
+    if "integrity" in ctx.parent_verified:
+        return 0
     manifest = read_regular(ctx.p.etc / "integrity.manifest").decode()
     checked = set()
     for line in manifest.splitlines():
@@ -84,7 +87,10 @@ def integrity(ctx):
         required |= {ctx.p.units / TIMER, ctx.p.units / "ygg-metrics.service", Path("/usr/bin/yggctl"),
                      ctx.p.runtime / "main.py", ctx.p.runtime / "core.py", ctx.p.runtime / "checks.py",
                      ctx.p.runtime / "management.py", ctx.p.runtime / "telemetry.py", ctx.p.runtime / "recovery.py",
-                     ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", ctx.p.runtime / "sandbox.py", Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
+                     ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", ctx.p.runtime / "sandbox.py",
+                     ctx.p.runtime / "broker.py", ctx.p.units / "ygg-alert-forward.service",
+                     ctx.p.units / "ygg-alert-forward.path", Path("/etc/sysusers.d/ygglab-worker.conf"),
+                     Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
                      ctx.p.etc / "mode", ctx.p.etc / "baseline.env"}
         required.add(ctx.p.etc / "baseline-runtime-public.txt")
         required.add(ctx.p.etc / "baseline-nft-mullvad.txt")
@@ -100,7 +106,8 @@ def underlay(ctx):
     mode = ctx.mode()
     pids = [int(ctx.unit(u).get("MainPID", "0")) for u in (NODE, STACK)]
     if not all(p > 0 for p in pids): raise Failure("missing_runtime_pid")
-    exclusions = set(re.findall(r"(?m)^\s*(\d+)\s*$", ctx.run(["/usr/bin/mullvad", "split-tunnel", "list"]).stdout.decode()))
+    split_list = ctx.run(["/usr/bin/mullvad", "split-tunnel", "list"]).stdout.decode()
+    exclusions = set(re.findall(r"(?m)^\s*(\d+)\s*$", split_list))
     if any((str(p) in exclusions) != (mode == "direct") for p in pids):
         raise Failure("underlay_pid_exclusion_mismatch")
     # Bind conntrack evidence to the local/remote four-tuple of each own socket.
@@ -175,7 +182,9 @@ def check(ctx, emit=True):
             failures.append(label)
             result = f"FAIL {exc}" if isinstance(exc, Failure) else "FAIL unavailable/invalid"
         if emit: print(f"[{i}/{len(gates)}] {label}: {result}; remaining={len(gates)-i}", flush=True)
-    if emit: print(f"CHECK {'FAIL' if failures else 'PASS'} processed={len(gates)} errors={len(failures)} elapsed={time.monotonic()-start:.2f}s")
+    if emit:
+        print(f"CHECK {'FAIL' if failures else 'PASS'} processed={len(gates)} errors={len(failures)} "
+              f"elapsed={time.monotonic()-start:.2f}s")
     if failures: raise Failure("health_gates_failed")
     return len(gates)
 
@@ -342,7 +351,8 @@ def nft_gate(ctx):
 def masked_gate(ctx):
     for u in ("yggdrasil.service", "yggdrasil-default-config.service"):
         v = ctx.unit(u)
-        if v.get("UnitFileState") != "masked" or v.get("ActiveState") != "inactive": raise Failure("packaged_unit_unmasked_or_running")
+        if v.get("UnitFileState") != "masked" or v.get("ActiveState") != "inactive":
+            raise Failure("packaged_unit_unmasked_or_running")
 
 
 @logged

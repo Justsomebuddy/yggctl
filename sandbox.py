@@ -1,26 +1,34 @@
-"""Atlas and research run in a transient systemd sandbox.
+"""Sandboxed commands: atlas, research and the network commands that handle data from
+other nodes run in a transient systemd unit as the unprivileged ygglab-worker user.
 
-They keep uid 0 because they need the node admin socket and their root-only stores,
-but they run without capabilities, on a read-only system, without the node keys,
-and see only their own entries of the state directory. Research has no network;
-atlas keeps TCP/UDP for the pinned public-peer catalogue.
+The root parent first runs what needs root (integrity, the sockets check, the console
+lock for research), then serves the worker read-only calls through broker.py. The worker
+sees no node keys and only its own store; research has no network, the network commands
+reach only localhost (the SOCKS proxy), atlas keeps TCP/UDP for the public-peer catalogue.
 """
+import contextlib
+import os
 import re
-import secrets
-from pathlib import Path
 
-from core import KEYS, logged, read_regular, trace_is_live
+import broker
+import checks
+from core import logged, trace_is_live
 
 UNIT_PREFIX = "yggctl-sandbox-"
 STATE = "/var/lib/yggdrasil-lab"
-ETC = "/etc/yggdrasil-lab"
+REMOTE_COMMANDS = ("ping", "bench", "socks-test", "nodeinfo", "whois", "debug-remote", "survey", "traceroute")
+ROLE_OF = {"atlas": "atlas", "research": "research", **{c: "remote" for c in REMOTE_COMMANDS}}
 COMMON = (
+    f"User={broker.WORKER}",
+    f"Group={broker.WORKER}",
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
     "ProtectSystem=strict",
     "ProtectHome=yes",
     "PrivateTmp=yes",
+    "ProtectProc=invisible",
+    "ProcSubset=pid",
     "ProtectKernelTunables=yes",
     "ProtectKernelModules=yes",
     "ProtectKernelLogs=yes",
@@ -37,65 +45,80 @@ COMMON = (
     "UMask=0077",
     "TasksMax=64",
     "MemoryMax=2G",
-    # Only the entries these commands use are visible in the state directory.
     f"TemporaryFileSystem={STATE}:mode=0755",
-    f"BindPaths={STATE}/.console.lock",
-    f"BindReadOnlyPaths=-{STATE}/metrics.jsonl",
-    # The integrity gate needs the manifest and its members; the keys are never members.
-    f"TemporaryFileSystem={ETC}:mode=0755",
+    "InaccessiblePaths=/etc/yggdrasil-lab",
     "InaccessiblePaths=-/etc/shadow -/etc/gshadow -/etc/ssh -/etc/sudoers -/etc/sudoers.d",
 )
 ROLES = {
     "atlas": (f"BindPaths={STATE}/atlas", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"),
     "research": (f"BindPaths={STATE}/research", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX"),
+    "remote": ("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", "IPAddressAllow=localhost",
+               "IPAddressDeny=any"),
 }
 
 
 @logged
-def inside(cgroup="/proc/self/cgroup"):
-    """True when this process already runs in a yggctl sandbox unit."""
+def own_unit(cgroup="/proc/self/cgroup"):
+    """(role, id) when this process runs in a yggctl sandbox unit, else None."""
     try:
         with open(cgroup, encoding="ascii", errors="replace") as f:
             text = f.read(65536)
     except OSError:
-        return False
-    return any(("/" + UNIT_PREFIX) in line for line in text.splitlines())
+        return None
+    for line in text.splitlines():
+        m = re.search("/" + UNIT_PREFIX + r"(atlas|research|remote)-([0-9a-f]{8})\.service$", line)
+        if m:
+            return m[1], m[2]
+    return None
 
 
 @logged
-def etc_allowlist(ctx):
-    """The manifest and its members under /etc/yggdrasil-lab, never a key file."""
-    manifest = ctx.p.etc / "integrity.manifest"
-    paths = {str(manifest)}
-    for line in read_regular(manifest).decode().splitlines():
-        m = re.fullmatch(r"[0-9a-f]{64}  (.+)", line)
-        if m and m[1].startswith(str(ctx.p.etc) + "/") and not Path(m[1]).name.startswith(KEYS):
-            paths.add(m[1])
-    return sorted(paths)
+def inside(cgroup="/proc/self/cgroup"):
+    return own_unit(cgroup) is not None
 
 
 @logged
-def properties(role, etc_files=()):
+def worker_context():
+    """The broker-backed context of a sandboxed worker, or None outside a sandbox."""
+    unit = own_unit()
+    if unit is None or os.geteuid() == 0:
+        return None
+    return broker.WorkerContext(broker.BROKER_DIR / f"{unit[0]}-{unit[1]}.sock")
+
+
+@logged
+def properties(role):
     if role not in ROLES:
         raise ValueError("unknown sandbox role")
-    return list(COMMON) + [f"BindReadOnlyPaths={p}" for p in etc_files] + list(ROLES[role])
+    return list(COMMON) + list(ROLES[role])
 
 
 @logged
-def command(role, args, main_path, *, etc_files=(), trace=False):
+def command(role, cmd, args, main_path, unit_id, *, trace=False):
     """systemd-run argv for one sandboxed yggctl command, and the unit to stop on interrupt."""
-    unit = f"{UNIT_PREFIX}{role}-{secrets.token_hex(4)}.service"
+    unit = f"{UNIT_PREFIX}{role}-{unit_id}.service"
     argv = ["/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
             "--service-type=exec", f"--unit={unit}"]
-    for prop in properties(role, etc_files):
+    for prop in properties(role):
         argv += ["-p", prop]
     argv += ["--", "/usr/bin/python3", "-I", "-B", str(main_path)]
     argv += ["--trace"] if trace else []
-    argv += [role, *args]
+    argv += [cmd, *args]
     return unit, argv
 
 
 @logged
-def run(ctx, role, args, main_path):
-    unit, argv = command(role, args, main_path, etc_files=etc_allowlist(ctx), trace=trace_is_live())
-    return ctx.run_attached(argv, stop=["/usr/bin/systemctl", "stop", unit])
+def run(ctx, cmd, args, main_path):
+    role = ROLE_OF[cmd]
+    ctx.root()
+    with contextlib.ExitStack() as stack:
+        if role == "research":
+            stack.enter_context(ctx.locked())  # research expects the console lock for its whole run
+        if role in ("atlas", "research"):
+            with ctx.locked():
+                checks.integrity(ctx)
+        if cmd in ("bench", "socks-test"):
+            checks.sockets(ctx)
+        served = stack.enter_context(broker.Broker(ctx, role))
+        unit, argv = command(role, cmd, args, main_path, served.unit_id, trace=trace_is_live())
+        return ctx.run_attached(argv, stop=["/usr/bin/systemctl", "stop", unit])

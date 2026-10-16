@@ -1,7 +1,9 @@
 """Bounded, serialized samples and truthful missing-data reporting."""
 import datetime as dt
+import hashlib
 import json
 import os
+import secrets
 import stat
 import statistics
 import time
@@ -12,9 +14,8 @@ from checks import peers
 
 @logged
 def rows(ctx, name="metrics.jsonl"):
-    path = ctx.p.state / name
-    if not path.exists(): return []
-    data = read_regular(path, 32 * 1024 * 1024)
+    data = ctx.read_state(name, 32 * 1024 * 1024)
+    if data is None: return []
     # An append in progress (or one torn by a crash) leaves an incomplete last line; skip it.
     if not data.endswith(b"\n"): data = data[:data.rfind(b"\n") + 1]
     values = []
@@ -75,10 +76,119 @@ def notify(ctx, action):
             atomic(ctx.p.state / "notify.state", action + "\n", 0o644)
             event("state", "notify", action)
         elif action == "test":
-            append(ctx, "alerts.jsonl", {"ts": timestamp(), "kind": "labelled-local-selftest"}, 1000)
+            append(ctx, "alerts.jsonl", {"ts": timestamp(), "id": secrets.token_hex(8),
+                                         "kind": "labelled-local-selftest"}, 1000)
             event("alert", "notify", "labelled_local_test")
         elif action != "show": raise Failure("notify_on_off_show_test")
-        print(f"notify={notify_state(ctx)}; local journal + alerts.jsonl only; no SimpleX delivery/ACK")
+        print(f"notify={notify_state(ctx)}; alerts.jsonl, then SimpleX via ygg-alert-forward (no ACK needed)")
+
+
+PEER_DOWN_MINUTES = 10
+
+
+@logged
+def peer_alerts(ctx, sample):
+    """Changes worth an alert: a peer down for PEER_DOWN_MINUTES, and its recovery.
+    Down peers are tracked in alert-state.json, rewritten only when the set changes."""
+    try:
+        state = json.loads(ctx.read_state("alert-state.json", 65536) or b"{}")
+        down = state.get("down", {}) if isinstance(state, dict) else {}
+    except ValueError:
+        down = {}
+    if not isinstance(down, dict):
+        down = {}
+    now = dt.datetime.fromisoformat(sample["ts"])
+    peers = [p for p in sample.get("peers", []) if isinstance(p.get("r"), str) and p.get("r")]
+    up, total = sum(bool(p.get("up")) for p in peers), len(peers)
+    changes, tracked = [], {}
+    for p in peers:
+        entry = down.get(p["r"]) if isinstance(down.get(p["r"]), dict) else {}
+        try:
+            since = dt.datetime.fromisoformat(entry.get("since", sample["ts"]))
+        except (TypeError, ValueError):
+            since = now
+        minutes = max(0, int((now - since).total_seconds() // 60))
+        if p.get("up"):
+            if entry.get("alerted"):
+                changes.append({"kind": "ygg-peer-up", "peer": p["r"], "minutes": minutes, "up": up, "total": total})
+            continue
+        alerted = bool(entry.get("alerted"))
+        if not alerted and minutes >= PEER_DOWN_MINUTES:
+            changes.append({"kind": "ygg-peer-down", "peer": p["r"], "minutes": minutes, "up": up, "total": total})
+            alerted = True
+        tracked[p["r"]] = {"since": since.isoformat(), "alerted": alerted}
+    if tracked != down:
+        atomic(ctx.p.state / "alert-state.json", json.dumps({"down": tracked}, sort_keys=True) + "\n", 0o600)
+    return changes
+
+
+SENDER = "/usr/local/bin/simplex-alert.sh"
+MESSAGES = {
+    "ygg-peer-down": ("Yggdrasil: пир недоступен", "Warning",
+                      "Нода yggdrasil-lab: пир {peer} недоступен {minutes} мин; на связи {up} из {total}. "
+                      "Проверка: sudo yggctl peers"),
+    "ygg-peer-up": ("Yggdrasil: пир снова на связи", "Warning",
+                    "Нода yggdrasil-lab: пир {peer} снова на связи после {minutes} мин; на связи {up} из {total}."),
+    "ygg-health": ("Yggdrasil: сбой ноды", "Error",
+                   "Нода yggdrasil-lab: {errors}. Проверка: sudo yggctl check"),
+    "labelled-local-selftest": ("Yggdrasil: проверка доставки тревог", "Warning",
+                                "Тестовая тревога yggctl (notify test); действий не требуется."),
+}
+
+
+@logged
+def alert_id(alert):
+    if isinstance(alert.get("id"), str):
+        return alert["id"]
+    return hashlib.sha256(json.dumps(alert, sort_keys=True).encode()).hexdigest()[:16]
+
+
+@logged
+def alert_message(alert):
+    default = ("Yggdrasil: тревога", "Warning", "Нода yggdrasil-lab: {kind}")
+    rule, priority, text = MESSAGES.get(alert.get("kind"), default)
+    fields = {k: str(v)[:120] for k, v in alert.items() if k in ("peer", "minutes", "up", "total", "kind")}
+    fields["errors"] = ", ".join(str(e)[:60] for e in alert.get("errors", [])[:5]) or "неизвестно"
+    try:
+        output = text.format(**fields)
+    except KeyError:
+        output = "Нода yggdrasil-lab: тревога " + str(alert.get("kind"))[:60]
+    return {"rule": rule, "priority": priority, "output": output[:300], "source": "yggctl",
+            "time": str(alert.get("ts", ""))[:40]}
+
+
+@logged
+def forward(ctx):
+    """Hand new alerts to the root-owned SimpleX sender; history is never re-sent."""
+    ctx.root()
+    with ctx.locked():
+        alerts = rows(ctx, "alerts.jsonl")
+        ids = [alert_id(a) for a in alerts]
+        raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
+        if raw is None:
+            atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": ids[-2000:]}) + "\n", 0o600)
+            print(f"[1/1] forwarding initialised; {len(ids)} earlier alerts not sent")
+            return
+        try:
+            sent = json.loads(raw).get("sent", [])
+        except (ValueError, AttributeError):
+            raise Failure("alerts_forwarded_state_invalid") from None
+        done, failures, new = set(sent), 0, 0
+        for alert, aid in zip(alerts, ids):
+            if aid in done:
+                continue
+            new += 1
+            r = ctx.run([SENDER], input=json.dumps(alert_message(alert), ensure_ascii=False).encode(),
+                        timeout=30, check=False)
+            if r.returncode == 0:
+                done.add(aid)
+            else:
+                failures += 1
+        kept = [i for i in ids if i in done][-2000:]
+        atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": kept}) + "\n", 0o600)
+        print(f"[1/1] alerts forwarded; processed={new} errors={failures}")
+        if failures:
+            raise Failure(f"alert_forward_failed:count={failures}")
 
 
 @logged
@@ -104,12 +214,17 @@ def collect(ctx):
             sample["errors"].append(str(exc) if isinstance(exc, Failure) else "metric_unavailable")
         if sample["up"] == 0 or sample["stack_up"] == 0: sample["errors"].append("no_up_peers")
         append(ctx, "metrics.jsonl", sample)
-        if sample["errors"] and notify_state(ctx) == "on":
-            key = "collect:" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H")
-            if not any(a.get("key") == key for a in rows(ctx, "alerts.jsonl")):
-                append(ctx, "alerts.jsonl", {"ts": sample["ts"], "kind": "ygg-health", "key": key,
-                                           "errors": sample["errors"]}, 1000)
-                event("alert", "collect", "health_degraded_local_only")
+        changes = peer_alerts(ctx, sample)
+        if notify_state(ctx) == "on":
+            for change in changes:
+                append(ctx, "alerts.jsonl", {"ts": sample["ts"], "id": secrets.token_hex(8), **change}, 1000)
+                event("alert", "collect", change["kind"])
+            if sample["errors"]:
+                key = "collect:" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H")
+                if not any(a.get("key") == key for a in rows(ctx, "alerts.jsonl")):
+                    append(ctx, "alerts.jsonl", {"ts": sample["ts"], "id": secrets.token_hex(8), "kind": "ygg-health",
+                                               "key": key, "errors": sample["errors"]}, 1000)
+                    event("alert", "collect", "health_degraded")
         if sample["errors"]: raise Failure("sample_recorded_with_unknown_or_degraded_health")
         print("[1/1] sample recorded; processed=2 instances errors=0 remaining=0")
         return sample
@@ -136,13 +251,16 @@ def stats(ctx, hours=24, graph=False):
     unknown = sum(r.get("up") is None or bool(r.get("errors")) for _, r in values)
     gaps = sum(max(0, round((b[0]-a[0]).total_seconds()/60)-1) for a, b in zip(values, values[1:]))
     names = sorted({p["r"] for _, r in values for p in r.get("peers", [])})
-    print(f"window={hours}h samples={len(values)} unknown_records={unknown} missing_minutes_between_samples={gaps}; observed availability is NOT wall-clock uptime")
+    print(f"window={hours}h samples={len(values)} unknown_records={unknown} "
+          f"missing_minutes_between_samples={gaps}; observed availability is NOT wall-clock uptime")
     for name in names:
         matches = [next((p for p in r.get("peers", []) if p["r"] == name), None) for _, r in values]
         known = [p for p in matches if p is not None]
         up = sum(p["up"] for p in known)
         latency = [p["rtt"] for p in known if p["up"] and p.get("rtt", 0) > 0]
-        print(f"{name}: observed_avail={100*up/len(known):.1f}% present={len(known)} absent={len(matches)-len(known)} median_ms={statistics.median(latency) if latency else 'unknown'}")
+        median = statistics.median(latency) if latency else "unknown"
+        print(f"{name}: observed_avail={100*up/len(known):.1f}% present={len(known)} "
+              f"absent={len(matches)-len(known)} median_ms={median}")
         if graph:
             # Bin the entire requested time window, not simply the last 60 samples.
             end = dt.datetime.now(dt.timezone.utc)
@@ -151,7 +269,9 @@ def stats(ctx, hours=24, graph=False):
             span = max(1, (end-begin).total_seconds())
             for (at, _), p in zip(values, matches):
                 bins[min(59, int((at-begin).total_seconds()*60/span))].append(p)
-            print("".join("?" if not b or all(p is None for p in b) else "." if not any(p and p["up"] for p in b) else "#" for b in bins))
+            marks = ("?" if not b or all(p is None for p in b) else "." if not any(p and p["up"] for p in b) else "#"
+                     for b in bins)
+            print("".join(marks))
             print("60 time bins: # observed up, . observed down, ? unknown; NOT RTT bars")
 
 
@@ -159,6 +279,8 @@ def stats(ctx, hours=24, graph=False):
 def watch(ctx, count=5, interval=2):
     start = time.monotonic()
     for i in range(count):
-        print(f"[{i+1}/{count}] node_up={sum(p['up'] for p in peers(ctx))} stack_up={sum(p['up'] for p in peers(ctx, True))} elapsed={time.monotonic()-start:.1f}s ETA={(count-i-1)*interval}s speed=1/{interval}s remaining={count-i-1}", flush=True)
+        print(f"[{i+1}/{count}] node_up={sum(p['up'] for p in peers(ctx))} "
+              f"stack_up={sum(p['up'] for p in peers(ctx, True))} elapsed={time.monotonic()-start:.1f}s "
+              f"ETA={(count-i-1)*interval}s speed=1/{interval}s remaining={count-i-1}", flush=True)
         if i+1 < count: time.sleep(interval)
     print(f"processed={count} errors=0 elapsed={time.monotonic()-start:.1f}s")

@@ -42,7 +42,8 @@ def transaction(ctx, updates, action, compensate):
         if pending.exists(): raise Failure("unfinished_transaction_run_recover_transaction")
         integrity(ctx)
         # Only secret-free console-owned configs/gates/mode and manifest are admitted.
-        allowed = {ctx.p.etc / n for n in ("yggdrasil-lab.conf", "yggstack.conf", "gate.nft", "gate-yggstack.nft", "mode")}
+        allowed = {ctx.p.etc / n for n in ("yggdrasil-lab.conf", "yggstack.conf", "gate.nft",
+                                           "gate-yggstack.nft", "mode")}
         if not set(updates) <= allowed: raise Failure("transaction_path_not_allowed")
         old = {str(p): read_regular(p).decode() for p in (*updates, ctx.p.etc / "integrity.manifest")}
         record = {"schema": 1, "at": timestamp(), "old": old, "phase": "prepared"}
@@ -88,7 +89,8 @@ def wait_peers(ctx, desired=None, seconds=25, absent=False):
             valid &= len(up) >= 2 and (desired is None or (desired not in configured if absent else desired in up))
         if valid: return
         if time.monotonic() >= deadline: raise Failure("peer_convergence_timeout")
-        print(f"[2/3] convergence pending; elapsed={seconds-(deadline-time.monotonic()):.1f}s ETA<={deadline-time.monotonic():.1f}s speed=1 probe/2s remaining=1", flush=True)
+        print(f"[2/3] convergence pending; elapsed={seconds-(deadline-time.monotonic()):.1f}s "
+              f"ETA<={deadline-time.monotonic():.1f}s speed=1 probe/2s remaining=1", flush=True)
         time.sleep(2)
 
 
@@ -122,7 +124,8 @@ def change_peer(ctx, value, remove=False, force=False, apply=False):
         if not apply:
             print("PREVIEW: both configs/runtime peers/gates; use --apply after firewall review")
             return
-        updates = {ctx.p.etc / name: json.dumps(c, indent=2) + "\n" for name, c in zip(("yggdrasil-lab.conf", "yggstack.conf"), configs)}
+        names = ("yggdrasil-lab.conf", "yggstack.conf")
+        updates = {ctx.p.etc / name: json.dumps(c, indent=2) + "\n" for name, c in zip(names, configs)}
         updates[ctx.p.etc / "gate.nft"] = gate_bytes(configs, "ygglab")
         updates[ctx.p.etc / "gate-yggstack.nft"] = gate_bytes(configs, "yggstack-gate")
         action = "removepeer" if remove else "addpeer"
@@ -165,7 +168,8 @@ def recover_transaction(ctx, apply=False):
         record = json.loads(read_regular(path).decode())
         if not isinstance(record, dict) or not isinstance(record.get("old"), dict):
             raise Failure("invalid_recovery_journal")
-        allowed = {str(ctx.p.etc / n) for n in ("mode", "gate.nft", "gate-yggstack.nft", "yggdrasil-lab.conf", "yggstack.conf", "integrity.manifest")}
+        allowed = {str(ctx.p.etc / n) for n in ("mode", "gate.nft", "gate-yggstack.nft", "yggdrasil-lab.conf",
+                                                "yggstack.conf", "integrity.manifest")}
         old = record.get("old", {})
         if not old or not set(old) <= allowed or any(not isinstance(v, str) for v in old.values()):
             raise Failure("invalid_recovery_journal")

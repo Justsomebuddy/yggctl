@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Operator CLI; no environment-selected paths or legacy unsafe fallback."""
 import argparse
+import dataclasses
 import ipaddress
 import json
 import math
@@ -13,7 +14,8 @@ from pathlib import Path
 
 # -I removes PYTHONPATH and the repository cwd. Installed directory is root-owned.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core import Context, Paths, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number, event, trace_live, finish_run
+from core import (Context, Paths, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number,
+                  event, trace_live, finish_run)
 import checks
 import management
 import telemetry
@@ -25,7 +27,7 @@ Health: check, selftest [offline], status, guard, verify-hashes, socks, socks-te
 View: peers, stack-peers, self, tree, paths, sessions, config [show|validate],
       mode [show], version, update-check, logs [N], events [hours], firewall-status
 Metrics: collect, stats [hours], graph [hours], watch/top [N] [seconds],
-         notify on|off|show|test, report, peers-score
+         notify on|off|show|test, alerts-forward, report, peers-score
 Management: start|stop|restart|enable|disable (or stack-*),
             add-peer URI [--force] [--apply], remove-peer IPv4:port [--apply],
             mode direct|tunnel [--apply], recover-transaction [--apply]
@@ -43,10 +45,11 @@ Overlay: ping [IPv6]:port (HTTP timing, NOT ICMP RTT), bench [N],
          Remote commands require another node's key; own key: use self/peers/tree.
 Guarded/deferred: nameserver show (mutations require firewall review), timer
  show; install/remove via trusted deployer. purge, rotate-key, chaos, upgrade,
- baseline-update fail closed pending separate custody/review. No SimpleX wiring.
+ baseline-update fail closed pending separate custody/review.
 Without sudo: help, version, update-check, stats, graph (metrics group-readable).
-Research and atlas run in a transient systemd sandbox: no capabilities, read-only
- system, no node keys; research without network.
+Research, atlas and overlay commands run sandboxed as user ygglab-worker (no root,
+ no node keys); research has no network, overlay commands reach only localhost.
+Alerts (peer down 10+ min, its recovery, node health) go to SimpleX while notify is on.
 Logging: one syslog summary line per run; the call trace is written only when
  the run fails, or always with --trace.
 Exit 0 verified success/explicit preview; 1 failure; 2 parser; 77 root required.
@@ -70,9 +73,11 @@ def http_probe(ctx, target):
     host, port = target[1:].split("]:")
     if ipaddress.ip_address(host) not in ipaddress.ip_network("200::/7") or not 1 <= int(port) <= 65535:
         raise Failure("overlay_target_required")
-    r = ctx.run(["/usr/bin/curl", "-q", "--silent", "--show-error", "--noproxy", "", "--proxy", "socks5h://127.0.0.1:1080",
+    r = ctx.run(["/usr/bin/curl", "-q", "--silent", "--show-error", "--noproxy", "",
+                 "--proxy", "socks5h://127.0.0.1:1080",
                  "--connect-timeout", "5", "--max-time", "15", "--max-filesize", "131072", "--proto", "=http",
-                 "--output", "/dev/null", "--write-out", "%{http_code} %{time_connect} %{time_pretransfer} %{time_starttransfer} %{time_total}",
+                 "--output", "/dev/null", "--write-out",
+                 "%{http_code} %{time_connect} %{time_pretransfer} %{time_starttransfer} %{time_total}",
                  "http://" + target + "/"], timeout=17, check=False)
     parts = r.stdout.decode().split()
     if len(parts) != 5 or not re.fullmatch(r"[0-9]{3}", parts[0]):
@@ -87,11 +92,16 @@ def http_probe(ctx, target):
     # proxy negotiation curl can finalize pretransfer/first-byte counters at
     # the timeout, so these counters do NOT prove that HTTP was reached.
     connect, ready, first, total = timings
-    print(f"curl_rc={r.returncode} HTTP={parts[0]} curl_connect_counter={connect:.6f}s pretransfer_counter={ready:.6f}s first_byte_counter={first:.6f}s total={total:.6f}s; counters do NOT prove failure stage/remote RTT")
+    print(f"curl_rc={r.returncode} HTTP={parts[0]} curl_connect_counter={connect:.6f}s "
+          f"pretransfer_counter={ready:.6f}s first_byte_counter={first:.6f}s total={total:.6f}s; "
+          "counters do NOT prove failure stage/remote RTT")
     if r.returncode:
         # Translate only known fixed curl messages; never echo arbitrary
         # server-controlled stderr. Unknown messages must stay unknown.
-        label = "proxy_connect_timeout" if r.returncode == 28 and b"Proxy connection timed out" in r.stderr else "timeout_stage_unknown" if r.returncode == 28 else "transfer_failed"
+        if r.returncode == 28 and b"Proxy connection timed out" in r.stderr:
+            label = "proxy_connect_timeout"
+        else:
+            label = "timeout_stage_unknown" if r.returncode == 28 else "transfer_failed"
         event("state", "http_probe", label)
         raise Failure(f"overlay_curl_failed:rc={r.returncode}:diagnostic={label}")
     if not 200 <= int(parts[0]) < 300:
@@ -113,11 +123,13 @@ def remote_key(ctx, value):
 @logged
 def socks_test(ctx, count=2):
     start = time.monotonic()
-    checks.sockets(ctx)
+    if "sockets" not in ctx.parent_verified:
+        checks.sockets(ctx)
     targets = ("[21e:a51c:885b:7db0:166e:927:98cd:d186]:80", "[222:a8e4:50cd:55c:788e:b0a5:4e2f:a92c]:80")
     errors = 0
     for i in range(count):
-        print(f"[{i+1}/{count}] overlay HTTP; processed={i}/{count} remaining={count-i-1} elapsed={time.monotonic()-start:.2f}s ETA<={(count-i)*17}s speed<=128KiB/request", flush=True)
+        print(f"[{i+1}/{count}] overlay HTTP; processed={i}/{count} remaining={count-i-1} "
+              f"elapsed={time.monotonic()-start:.2f}s ETA<={(count-i)*17}s speed<=128KiB/request", flush=True)
         try: http_probe(ctx, targets[i % 2])
         except Failure as exc:
             errors += 1
@@ -147,143 +159,362 @@ def selftest(ctx, offline=False):
     print("SELFTEST PASS read-only; overlay e2e separate socks-test; mutations isolated offline")
 
 
+@dataclasses.dataclass(frozen=True)
+class Command:
+    """A CLI command and the rules dispatch enforces before calling its handler."""
+    handler: object
+    most: int = 0                    # most positional arguments; -1 lets the handler check
+    root: bool = True                # dispatch requires sudo before calling the handler
+    flags: frozenset = frozenset()   # allowed among: apply, force, full, recipient
+
+
+@logged
+def do_help(ctx, args, a):
+    print(HELP)
+
+
+@logged
+def do_version(ctx, args, a):
+    print(f"yggctl {VERSION}; Python {sys.version.split()[0]}")
+    print(ctx.run(["/usr/bin/dpkg-query", "-W", "-f=${Version}\n", "yggdrasil"]).stdout.decode().strip())
+
+
+@logged
+def do_update_check(ctx, args, a):
+    print(ctx.run(["/usr/bin/apt-cache", "policy", "yggdrasil"]).stdout.decode())
+    print("Upstream comparison requires an explicit small GitHub fetch; no automatic install")
+
+
+@logged
+def do_selftest(ctx, args, a):
+    if a == ["offline"]:
+        selftest(ctx, True)
+        return
+    ctx.root()
+    if a:
+        raise Failure("selftest_only_optional_offline")
+    selftest(ctx)
+
+
+@logged
+def do_stats(ctx, args, a):
+    # Read-only and lock-free: the metrics file is group-readable, so sudo is
+    # needed only when this user cannot read it.
+    if os.geteuid() != 0 and not os.access(ctx.p.state / "metrics.jsonl", os.R_OK):
+        ctx.root()
+    graph = args.command == "graph"
+    telemetry.stats(ctx, bounded_number(a[0], 1, 72) if a else (6 if graph else 24), graph)
+
+
+API_VIEWS = {"peers": "getPeers", "stack-peers": "getPeers", "self": "getSelf", "tree": "getTree",
+             "paths": "getPaths", "sessions": "getSessions"}
+
+
+@logged
+def do_view(ctx, args, a):
+    output(ctx.api(API_VIEWS[args.command], stack=args.command == "stack-peers"))
+
+
+@logged
+def do_check(ctx, args, a):
+    checks.check(ctx)
+
+
+@logged
+def do_guard(ctx, args, a):
+    print(checks.guard(ctx))
+    print("GUARD PASS (not a numerical security score)")
+
+
+@logged
+def do_verify_hashes(ctx, args, a):
+    print(f"integrity PASS members={checks.integrity(ctx)}")
+
+
+@logged
+def do_socks(ctx, args, a):
+    print(checks.sockets(ctx))
+    output(checks.underlay(ctx))
+
+
+@logged
+def do_socks_test(ctx, args, a):
+    socks_test(ctx)
+
+
+@logged
+def do_mode(ctx, args, a):
+    if not a or a == ["show"]:
+        output({"mode": ctx.mode(), "proof": checks.underlay(ctx)})
+    else:
+        management.change_mode(ctx, a[0], args.apply)
+
+
+@logged
+def do_config(ctx, args, a):
+    for name in ("yggdrasil-lab.conf", "yggstack.conf"):
+        config = ctx.config(name)
+        if not a or a == ["show"]:
+            output({name: config})
+        elif a == ["validate"]:
+            if checks.safe_config(config):
+                raise Failure("unsafe_config")
+            print(name + " syntax/security PASS")
+        else:
+            raise Failure("config_edit_disabled_use_reviewed_transaction")
+
+
+@logged
+def do_service(ctx, args, a):
+    management.service(ctx, args.command)
+
+
+@logged
+def do_peer(ctx, args, a):
+    if len(a) != 1:
+        raise Failure("one_peer_argument_required")
+    management.change_peer(ctx, a[0], args.command == "remove-peer", args.force, args.apply)
+
+
+@logged
+def do_recover(ctx, args, a):
+    management.recover_transaction(ctx, args.apply)
+
+
+@logged
+def do_collect(ctx, args, a):
+    telemetry.collect(ctx)
+
+
+@logged
+def do_watch(ctx, args, a):
+    count = bounded_number(a[0], 1, 60) if a else 5
+    telemetry.watch(ctx, count, bounded_number(a[1], 1, 30) if len(a) > 1 else 2)
+
+
+@logged
+def do_notify(ctx, args, a):
+    telemetry.notify(ctx, a[0] if len(a) == 1 else "show")
+
+
+@logged
+def do_alerts_forward(ctx, args, a):
+    telemetry.forward(ctx)
+
+
+@logged
+def do_backup(ctx, args, a):
+    recovery.backup(ctx, args.full, args.recipient)
+
+
+@logged
+def do_restore(ctx, args, a):
+    if len(a) != 1:
+        raise Failure("one_archive_path_required")
+    recovery.restore(ctx, a[0], args.apply)
+
+
+@logged
+def do_snapshot(ctx, args, a):
+    recovery.snapshot(ctx)
+
+
+@logged
+def do_diff(ctx, args, a):
+    recovery.diff(ctx, a[0] if a else None)
+
+
+@logged
+def do_doctor(ctx, args, a):
+    # Secret-free allowlisted backup and structured data; no broad log/config tar.
+    recovery.backup(ctx)
+    output({"node": ctx.unit(NODE), "stack": ctx.unit(STACK), "timer": ctx.unit(TIMER),
+            "pending_transaction": (ctx.p.state / "transaction.json").exists()})
+
+
+@logged
+def do_report(ctx, args, a):
+    checks.check(ctx)
+    telemetry.stats(ctx)
+
+
+@logged
+def do_research(ctx, args, a):
+    import research
+    output(research.command(ctx, a))
+
+
+@logged
+def do_atlas(ctx, args, a):
+    import atlas
+    output(atlas.command(ctx, a))
+
+
+@logged
+def do_logs(ctx, args, a):
+    n = bounded_number(a[0], 1, 1000) if a else 50
+    command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-n", str(n)]
+    if args.command == "events":
+        command += ["--since", f"{bounded_number(a[0], 1, 72) if a else 6} hours ago"]
+    value = ctx.run(command).stdout.decode(errors="replace")
+    # JSON presentation escapes terminal controls; known secret-shaped assignments masked.
+    value = re.sub(r"(?i)(privatekey|password|token|secret)\s*[:=]\s*\S+", r"\1=[REDACTED]", value)
+    output({"logs": value})
+
+
+@logged
+def do_firewall_status(ctx, args, a):
+    checks.policy_gate(ctx)
+    output({"accepted_surface": "unchanged", "watchdog": "independent; no baseline/allowlist rewrite"})
+
+
+@logged
+def do_ping(ctx, args, a):
+    if len(a) != 1:
+        raise Failure("one_overlay_ipv6_port_required")
+    http_probe(ctx, a[0])
+
+
+@logged
+def do_bench(ctx, args, a):
+    socks_test(ctx, bounded_number(a[0], 1, 3) if a else 1)
+
+
+REMOTE_DEBUG = {"self": "debug_remotegetself", "peers": "debug_remotegetpeers", "tree": "debug_remotegettree"}
+
+
+@logged
+def do_debug_remote(ctx, args, a):
+    if len(a) == 2 and a[0] == "dht":
+        raise Failure("remote_dht_not_supported_by_upstream_use_tree")
+    if len(a) != 2 or a[0] not in REMOTE_DEBUG:
+        raise Failure("debug_remote_self_peers_tree_key")
+    output(ctx.api(REMOTE_DEBUG[a[0]], key=remote_key(ctx, a[1])))
+
+
+@logged
+def do_nodeinfo(ctx, args, a):
+    if len(a) != 1:
+        raise Failure("one_public_key_required")
+    target = remote_key(ctx, a[0])
+    output(ctx.api("getNodeInfo", key=target))
+    if args.command == "whois":
+        output(ctx.api("debug_remotegetself", key=target))
+
+
+@logged
+def do_peers_score(ctx, args, a):
+    data = checks.peers(ctx)
+    output(sorted(data, key=lambda p: (not p["up"], p.get("latency", 0))))
+    print("Ranking by current up/latency only; not a trust/reliability score")
+
+
+@logged
+def do_survey(ctx, args, a):
+    if args.command == "traceroute":
+        if len(a) != 1:
+            raise Failure("one_public_key_required")
+        key(a[0])
+    output(ctx.api("getTree"))
+    print("Tree introspection only; not forwarding path/traceroute; no automatic remote survey")
+
+
+@logged
+def do_discover(ctx, args, a):
+    print("Offline public-peers catalogue: Iggdrasil_full_repo/public-peers; "
+          "no root git pull or TCP probe masquerading as QUIC test")
+
+
+@logged
+def do_unit_show(ctx, args, a):
+    if a and a != ["show"]:
+        raise Failure("requires_reviewed_deployment_or_firewall_review")
+    nameserver = args.command == "nameserver"
+    output(ctx.unit(STACK if nameserver else TIMER))
+    print("nameserver not added; SOCKS remains 127.0.0.1:1080" if nameserver else "trusted deployer owns timer")
+
+
+APPLY = frozenset({"apply"})
+SERVICES = ("start", "stop", "restart", "enable", "disable",
+            "stack-start", "stack-stop", "stack-restart", "stack-enable", "stack-disable")
+COMMANDS = {
+    "help": Command(do_help, root=False),
+    "--help": Command(do_help, root=False),
+    "version": Command(do_version, root=False),
+    "update-check": Command(do_update_check, root=False),
+    "selftest": Command(do_selftest, most=1, root=False),
+    "stats": Command(do_stats, most=1, root=False),
+    "graph": Command(do_stats, most=1, root=False),
+    **{name: Command(do_view) for name in API_VIEWS},
+    "check": Command(do_check),
+    "status": Command(do_check),
+    "guard": Command(do_guard),
+    "verify-hashes": Command(do_verify_hashes),
+    "socks": Command(do_socks),
+    "socks-test": Command(do_socks_test),
+    "mode": Command(do_mode, most=1, flags=APPLY),
+    "config": Command(do_config, most=1),
+    **{name: Command(do_service) for name in SERVICES},
+    "add-peer": Command(do_peer, most=-1, flags=frozenset({"apply", "force"})),
+    "remove-peer": Command(do_peer, most=-1, flags=APPLY),
+    "recover-transaction": Command(do_recover, flags=APPLY),
+    "collect": Command(do_collect),
+    "watch": Command(do_watch, most=2),
+    "top": Command(do_watch, most=2),
+    "notify": Command(do_notify, most=1),
+    "alerts-forward": Command(do_alerts_forward),
+    "backup": Command(do_backup, flags=frozenset({"full", "recipient"})),
+    "restore": Command(do_restore, most=1, flags=APPLY),
+    "snapshot": Command(do_snapshot),
+    "diff": Command(do_diff, most=1),
+    "doctor": Command(do_doctor),
+    "report": Command(do_report),
+    "research": Command(do_research, most=-1),
+    "atlas": Command(do_atlas, most=-1),
+    "logs": Command(do_logs, most=1),
+    "events": Command(do_logs, most=1),
+    "firewall-status": Command(do_firewall_status),
+    "ping": Command(do_ping, most=1),
+    "bench": Command(do_bench, most=1),
+    "nodeinfo": Command(do_nodeinfo, most=1),
+    "whois": Command(do_nodeinfo, most=1),
+    "debug-remote": Command(do_debug_remote, most=-1),
+    "peers-score": Command(do_peers_score),
+    "survey": Command(do_survey),
+    "traceroute": Command(do_survey, most=1),
+    "discover": Command(do_discover),
+    "nameserver": Command(do_unit_show, most=1),
+    "timer": Command(do_unit_show, most=1),
+}
+LEGACY_DISABLED = ("purge", "rotate-key", "chaos", "upgrade", "baseline-update")
+
+
 @logged
 def dispatch(ctx, args):
     cmd, a = args.command, args.args
-    no_args = {"help", "version", "update-check", "check", "status", "guard", "verify-hashes", "socks", "socks-test", "collect", "snapshot", "backup", "doctor", "report", "firewall-status", "peers", "stack-peers", "self", "tree", "paths", "sessions", "peers-score", "survey", "discover", "recover-transaction"}
-    no_args |= {"start", "stop", "restart", "enable", "disable", "stack-start", "stack-stop", "stack-restart", "stack-enable", "stack-disable"}
-    one_arg = {"mode", "config", "stats", "graph", "notify", "restore", "diff", "logs", "events", "ping", "bench", "nodeinfo", "whois", "nameserver", "timer", "selftest", "traceroute"}
-    if (cmd in no_args and a) or (cmd in one_arg and len(a)>1) or (cmd in {"watch","top"} and len(a)>2):
+    spec = COMMANDS.get(cmd)
+    if spec is not None and spec.most >= 0 and len(a) > spec.most:
         raise Failure("unexpected_arguments")
-    if args.apply and cmd not in {"add-peer","remove-peer","mode","restore","recover-transaction"}: raise Failure("apply_not_supported_here")
-    if args.force and cmd != "add-peer": raise Failure("force_only_for_add_peer")
-    if (args.full or args.recipient) and cmd != "backup": raise Failure("backup_options_only")
-    if cmd in ("help", "--help"):
-        print(HELP)
-        return
-    if cmd == "version":
-        print(f"yggctl {VERSION}; Python {sys.version.split()[0]}")
-        print(ctx.run(["/usr/bin/dpkg-query", "-W", "-f=${Version}\n", "yggdrasil"]).stdout.decode().strip())
-        return
-    if cmd == "update-check":
-        print(ctx.run(["/usr/bin/apt-cache", "policy", "yggdrasil"]).stdout.decode())
-        print("Upstream comparison requires an explicit small GitHub fetch; no automatic install")
-        return
-    if cmd == "selftest" and a == ["offline"]:
-        selftest(ctx, True)
-        return
-    if cmd in ("stats", "graph"):
-        # Read-only and lock-free: the metrics file is group-readable, so sudo is
-        # needed only when this user cannot read it.
-        if os.geteuid() != 0 and not os.access(ctx.p.state / "metrics.jsonl", os.R_OK):
-            ctx.root()
-        telemetry.stats(ctx, bounded_number(a[0], 1, 72) if a else (6 if cmd == "graph" else 24), cmd == "graph")
-        return
-    ctx.root()
-    api = {"peers": "getPeers", "stack-peers": "getPeers", "self": "getSelf", "tree": "getTree", "paths": "getPaths", "sessions": "getSessions"}
-    if cmd in api:
-        output(ctx.api(api[cmd], stack=cmd == "stack-peers"))
-    elif cmd in ("check", "status"):
-        checks.check(ctx)
-    elif cmd == "selftest":
-        if a: raise Failure("selftest_only_optional_offline")
-        selftest(ctx)
-    elif cmd == "guard": print(checks.guard(ctx)); print("GUARD PASS (not a numerical security score)")
-    elif cmd == "verify-hashes": print(f"integrity PASS members={checks.integrity(ctx)}")
-    elif cmd == "socks": print(checks.sockets(ctx)); output(checks.underlay(ctx))
-    elif cmd == "socks-test": socks_test(ctx)
-    elif cmd == "mode":
-        if not a or a == ["show"]: output({"mode": ctx.mode(), "proof": checks.underlay(ctx)})
-        else: management.change_mode(ctx, a[0], args.apply)
-    elif cmd == "config":
-        for name in ("yggdrasil-lab.conf", "yggstack.conf"):
-            config = ctx.config(name)
-            if not a or a == ["show"]: output({name: config})
-            elif a == ["validate"]:
-                if checks.safe_config(config): raise Failure("unsafe_config")
-                print(name + " syntax/security PASS")
-            else: raise Failure("config_edit_disabled_use_reviewed_transaction")
-    elif cmd in {"start", "stop", "restart", "enable", "disable", "stack-start", "stack-stop", "stack-restart", "stack-enable", "stack-disable"}:
-        management.service(ctx, cmd)
-    elif cmd in ("add-peer", "remove-peer"):
-        if len(a) != 1: raise Failure("one_peer_argument_required")
-        management.change_peer(ctx, a[0], cmd == "remove-peer", args.force, args.apply)
-    elif cmd == "recover-transaction": management.recover_transaction(ctx, args.apply)
-    elif cmd == "collect": telemetry.collect(ctx)
-    elif cmd in ("watch", "top"):
-        telemetry.watch(ctx, bounded_number(a[0], 1, 60) if a else 5, bounded_number(a[1], 1, 30) if len(a)>1 else 2)
-    elif cmd == "notify": telemetry.notify(ctx, a[0] if len(a) == 1 else "show")
-    elif cmd == "backup": recovery.backup(ctx, args.full, args.recipient)
-    elif cmd == "restore":
-        if len(a) != 1: raise Failure("one_archive_path_required")
-        recovery.restore(ctx, a[0], args.apply)
-    elif cmd == "snapshot": recovery.snapshot(ctx)
-    elif cmd == "diff": recovery.diff(ctx, a[0] if a else None)
-    elif cmd == "doctor":
-        # Secret-free allowlisted backup and structured data; no broad log/config tar.
-        recovery.backup(ctx)
-        output({"node": ctx.unit(NODE), "stack": ctx.unit(STACK), "timer": ctx.unit(TIMER), "pending_transaction": (ctx.p.state/"transaction.json").exists()})
-    elif cmd == "report":
-        checks.check(ctx)
-        telemetry.stats(ctx)
-    elif cmd in ("research", "atlas") and not sandbox.inside() and ctx.p == Paths():
-        # The live system runs these in a transient systemd sandbox (see sandbox.py).
+    flags = spec.flags if spec else frozenset()
+    if args.apply and "apply" not in flags:
+        raise Failure("apply_not_supported_here")
+    if args.force and "force" not in flags:
+        raise Failure("force_only_for_add_peer")
+    if (args.full or args.recipient) and "full" not in flags:
+        raise Failure("backup_options_only")
+    if spec is None or spec.root:
+        ctx.root()
+    if spec is None:
+        if cmd in LEGACY_DISABLED:
+            raise Failure("legacy_high_risk_operation_disabled_requires_separate_custody_review_and_tests")
+        raise Failure("unknown_command_use_help")
+    if cmd in sandbox.ROLE_OF and not sandbox.inside() and ctx.p == Paths():
+        # On the live system these run sandboxed as an unprivileged user (see sandbox.py).
         rc = sandbox.run(ctx, cmd, a, Path(__file__).resolve())
-        if rc: raise Failure(f"sandboxed_{cmd}_failed:rc={rc}")
-    elif cmd == "research":
-        import research
-        output(research.command(ctx, a))
-    elif cmd == "atlas":
-        import atlas
-        output(atlas.command(ctx, a))
-    elif cmd in ("logs", "events"):
-        n = bounded_number(a[0], 1, 1000) if a else 50
-        command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-n", str(n)]
-        if cmd == "events": command += ["--since", f"{bounded_number(a[0],1,72) if a else 6} hours ago"]
-        value = ctx.run(command).stdout.decode(errors="replace")
-        # JSON presentation escapes terminal controls; known secret-shaped assignments masked.
-        value = re.sub(r"(?i)(privatekey|password|token|secret)\s*[:=]\s*\S+", r"\1=[REDACTED]", value)
-        output({"logs": value})
-    elif cmd == "firewall-status":
-        checks.policy_gate(ctx)
-        output({"accepted_surface": "unchanged", "watchdog": "independent; no baseline/allowlist rewrite"})
-    elif cmd in ("ping", "bench"):
-        if cmd == "ping":
-            if len(a) != 1: raise Failure("one_overlay_ipv6_port_required")
-            http_probe(ctx, a[0])
-        else: socks_test(ctx, bounded_number(a[0],1,3) if a else 1)
-    elif cmd in ("nodeinfo", "whois", "debug-remote"):
-        if cmd == "debug-remote":
-            methods = {"self": "debug_remotegetself", "peers": "debug_remotegetpeers", "tree": "debug_remotegettree"}
-            if len(a) == 2 and a[0] == "dht":
-                raise Failure("remote_dht_not_supported_by_upstream_use_tree")
-            if len(a) != 2 or a[0] not in methods: raise Failure("debug_remote_self_peers_tree_key")
-            output(ctx.api(methods[a[0]], key=remote_key(ctx, a[1])))
-        else:
-            if len(a) != 1: raise Failure("one_public_key_required")
-            target = remote_key(ctx, a[0])
-            output(ctx.api("getNodeInfo", key=target))
-            if cmd == "whois": output(ctx.api("debug_remotegetself", key=target))
-    elif cmd == "peers-score":
-        data = checks.peers(ctx)
-        output(sorted(data, key=lambda p: (not p["up"], p.get("latency", 0))))
-        print("Ranking by current up/latency only; not a trust/reliability score")
-    elif cmd in ("survey", "traceroute"):
-        if cmd == "traceroute":
-            if len(a) != 1: raise Failure("one_public_key_required")
-            key(a[0])
-        output(ctx.api("getTree"))
-        print("Tree introspection only; not forwarding path/traceroute; no automatic remote survey")
-    elif cmd == "discover":
-        print("Offline public-peers catalogue: Iggdrasil_full_repo/public-peers; no root git pull or TCP probe masquerading as QUIC test")
-    elif cmd in ("nameserver", "timer"):
-        if a and a != ["show"]: raise Failure("requires_reviewed_deployment_or_firewall_review")
-        output(ctx.unit(STACK if cmd == "nameserver" else TIMER))
-        print("nameserver not added; SOCKS remains 127.0.0.1:1080" if cmd == "nameserver" else "trusted deployer owns timer")
-    elif cmd in ("purge", "rotate-key", "chaos", "upgrade", "baseline-update"):
-        raise Failure("legacy_high_risk_operation_disabled_requires_separate_custody_review_and_tests")
-    else: raise Failure("unknown_command_use_help")
-
+        if rc:
+            raise Failure(f"sandboxed_{cmd}_failed:rc={rc}")
+        return
+    spec.handler(ctx, args, a)
 
 # Only command words documented in HELP reach the run summary; anything else is "other".
 RUN = {"command": "other"}
@@ -291,7 +522,8 @@ RUN = {"command": "other"}
 
 @logged
 def run_label(command):
-    if re.fullmatch(r"[a-z][a-z-]{0,23}", command or "") and re.search(rf"(?<![\w-]){re.escape(command)}(?![\w-])", HELP):
+    documented = re.search(rf"(?<![\w-]){re.escape(command or '')}(?![\w-])", HELP)
+    if re.fullmatch(r"[a-z][a-z-]{0,23}", command or "") and documented:
         return command
     return "other"
 
@@ -319,7 +551,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     start = time.monotonic()
     try:
-        dispatch(Context(), args)
+        dispatch(sandbox.worker_context() or Context(), args)
     except (Failure, OSError, ValueError, KeyError, TypeError) as exc:
         label = str(exc) if isinstance(exc, Failure) else "unavailable_or_invalid_data"
         print(f"FAIL {label}; processed=0 errors=1 elapsed={time.monotonic()-start:.2f}s", file=sys.stderr)
