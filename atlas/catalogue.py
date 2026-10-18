@@ -36,7 +36,10 @@ def endpoint(uri):
         try: host = str(ipaddress.ip_address(host))
         except ValueError:
             host = host.encode('idna').decode('ascii')
-            if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", host): raise ValueError()
+            labels = host[:-1].split('.') if host.endswith('.') else host.split('.')
+            if (len(host.rstrip('.')) > 253 or any(not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+                raise ValueError() from None
         if not 1 <= parts.port <= 65535: raise ValueError()
         query = urllib.parse.parse_qs(parts.query, keep_blank_values=True, max_num_fields=64)
         keys = sorted({public_key(k) for k in query.get("key", [])})

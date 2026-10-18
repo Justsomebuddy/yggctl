@@ -271,6 +271,26 @@ class AtlasTests(ConsoleTests):
             self.crawled(s);d=analysis.build(s);d['limits'].append('<img src=x onerror=alert(1)>');d['countries']['unknown-country']={'endpoints':1,'pin_keys':0,'registry_online':0,'registry_offline':0,'registry_unknown':1}
             page=html(d);self.assertNotIn('<img src=x',page);self.assertIn('&lt;img',page);self.assertIn('unknown-country',page)
 
+
+    @logged
+    def test_dns_label_edges_and_idna_without_network(self):
+        for host in ('bad-.test', '-bad.test', 'bad..test', 'a'*64+'.test', 'bad_.test'):
+            with self.assertRaisesRegex(Failure, 'atlas_invalid_catalogue_endpoint'):
+                catalogue.endpoint('tls://'+host+':443')
+        for host in ('a.test', 'good-label.test', 'a'*63+'.test', 'example.test.', 'пример.рф'):
+            self.assertTrue(catalogue.endpoint('tls://'+host+':443')['endpoint'])
+        self.assertEqual(self.calls, [])
+
+    @logged
+    def test_components_adverse_chain_final_pass_compressed(self):
+        # Reversed unions leave a chain in insertion order; final counting used to be O(n²).
+        keys = list(range(20000))
+        edges = [{'kind':'reported_peer', 'source':i+1, 'target':i} for i in range(len(keys)-1)]
+        start = time.monotonic()
+        self.assertEqual(analysis.components(keys, edges), [len(keys)])
+        self.assertLess(time.monotonic()-start, 2., 'adverse chain must not take quadratic time')
+        self.assertEqual(analysis.components([1,2,3], [{'kind':'local_tree_parent','source':1,'target':2}]), [1,1,1])
+
 @logged
 def run_suite():
     names=sorted(n for n in AtlasTests.__dict__ if n.startswith('test_'));start=time.monotonic()

@@ -23,7 +23,10 @@ def components(keys, edges):
         if a != b: parent[b] = a
     sizes = {}
     for key in parent:
-        while parent[key] != key: key = parent[key]
+        # Final traversal needs compression too: union order can leave a long chain.
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
         sizes[key] = sizes.get(key,0)+1
     return sorted(sizes.values(),reverse=True)
 

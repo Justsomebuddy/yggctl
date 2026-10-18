@@ -313,7 +313,7 @@ class ConsoleTests(unittest.TestCase):
         messages = str(trace.call_args_list)+str(states.call_args_list)
         self.assertNotIn('SECRET_DO_NOT_LOG', messages)
         self.assertNotIn('1.1.1.1', messages)
-        self.assertIn('legacy_anchored_local_quic_relay_only', messages)
+        self.assertIn('legacy_anchored_local_quic_and_tunnel_addresses', messages)
 
     @logged
     def test_peer_bad_inputs(self):
@@ -1056,6 +1056,320 @@ class ConsoleTests(unittest.TestCase):
         import core
         self.assertEqual(core.attached_process(["/bin/sh", "-c", "exit 0"], stop=["/bin/true"]), 0)
         self.assertEqual(core.attached_process(["/bin/sh", "-c", "exit 3"], stop=["/bin/true"]), 3)
+
+
+    # Audit regressions: journals, independently anchored Mullvad addresses and bootstrap inputs.
+    @logged
+    def test_journal_message_boundary_masks_secret_forms(self):
+        messages = ['"PrivateKey": "SYNTHETIC_CANARY"', 'password=SYNTHETIC_CANARY',
+                    'token: "escaped\\"SYNTHETIC_CANARY"', 'Secret:\nSYNTHETIC_CANARY',
+                    r'{"\u0050rivateKey":"SYNTHETIC_CANARY"}',
+                    '-----BEGIN PRIVATE KEY-----\nSYNTHETIC_CANARY\n-----END PRIVATE KEY-----']
+        for message in messages:
+            with self.subTest(form=messages.index(message)):
+                data = json.dumps({"MESSAGE": message, "_SYSTEMD_UNIT": NODE}).encode()
+                value = main.journal_records(data)
+                self.assertNotIn('SYNTHETIC_CANARY', json.dumps(value))
+                self.assertIn('REDACTED', value[0]['message'])
+        safe = main.journal_records(b'{"MESSAGE":"peer connected","__REALTIME_TIMESTAMP":"123"}')[0]
+        self.assertEqual(safe['message'], 'peer connected')
+        self.assertEqual(safe['timestamp_us'], '123')
+        self.assertEqual(main.journal_records(b'{"MESSAGE":[1,2]}')[0]['message'],
+                         '[non-text journal message omitted]')
+
+    @logged
+    def test_journal_invalid_input_never_printed(self):
+        for raw in (b'SYNTHETIC_CANARY', b'[]', b'{"MESSAGE":'):
+            with self.assertRaisesRegex(Failure, 'invalid_journal_json_no_raw_output'):
+                main.journal_records(raw)
+        self.assertEqual(main.journal_records(b''), [])
+
+    @logged
+    def test_logs_requests_json_and_projects_metadata(self):
+        response = subprocess.CompletedProcess([], 0, b'{"MESSAGE":"ok","arbitrary":"SYNTHETIC_CANARY"}', b'')
+        out = io.StringIO()
+        with patch.object(self.ctx, 'run', return_value=response) as run, contextlib.redirect_stdout(out):
+            main.do_logs(self.ctx, type('Args', (), {'command': 'events'})(), ['2'])
+        self.assertIn('json', run.call_args.args[0])
+        self.assertIn('--since', run.call_args.args[0])
+        self.assertNotIn('SYNTHETIC_CANARY', out.getvalue())
+
+    @logged
+    def tunnel_fixture(self):
+        ref, _, expected, _ = self.relay_fixture()
+        ref = ref.replace(b'\tchain input {\n', b'\tchain input {\n\t\tip daddr 10.147.0.1 drop\n'
+                          b'\t\tip6 daddr fc00::1 drop\n')
+        cur = ref.replace(b'8.8.8.8', b'1.1.1.1').replace(b'10.147.0.1', b'10.147.0.2')
+        cur = cur.replace(b'fc00::1', b'fc00::2')
+        expected['NFT_MULLVAD_SHA'] = digest(ref)
+        observed = dict(expected, NFT_MULLVAD_SHA=digest(cur))
+        atomic(self.paths.etc/'baseline-nft-mullvad.txt', ref)
+        self.relay_table = cur
+        addresses = [{'ifname': 'wg0-mullvad', 'flags': ['UP'], 'addr_info': [
+            {'family': 'inet', 'scope': 'global', 'local': '10.147.0.2'},
+            {'family': 'inet6', 'scope': 'global', 'local': 'fc00::2'}]}]
+        self.address_views = [json.dumps(addresses).encode()]*2
+        previous = self.ctx.runner
+        @logged
+        def response(argv, **kwargs):
+            if argv[0] == '/usr/sbin/ip':
+                return subprocess.CompletedProcess(argv, 0, self.address_views.pop(0), b'')
+            return previous(argv, **kwargs)
+        self.ctx.runner = response
+        return ref, cur, expected, observed
+
+    @logged
+    def test_policy_two_kernel_proven_tunnel_slots(self):
+        ref, _, expected, observed = self.tunnel_fixture()
+        with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed):
+            checks.policy_gate(self.ctx)
+        self.assertEqual(read_regular(self.paths.etc/'baseline-nft-mullvad.txt'), ref)
+        self.assertEqual(self.address_views, [])
+
+    @logged
+    def test_policy_tunnel_wrong_slot_address_verdict_rejected(self):
+        ref, cur, _, _ = self.tunnel_fixture()
+        for changed in (cur.replace(b'fc00::2', b'fc00::3'), cur.replace(b'10.147.0.2', b'10.147.0.3'),
+                        cur.replace(b'fc00::2 drop', b'fc00::2 accept'),
+                        cur.replace(b'\t\tip daddr 10.147.0.2 drop\n', b'')):
+            self.assertFalse(checks.relay_display(ref, changed, b'1.1.1.1', ('10.147.0.2', 'fc00::2')))
+        extra = ref.replace(b'\t\tip6 daddr fc00::1 drop\n', b'\t\tip6 daddr fc00::1 drop\n'*2)
+        with self.assertRaises(Failure):
+            checks.relay_display(extra, cur, b'1.1.1.1', ('10.147.0.2', 'fc00::2'))
+
+    @logged
+    def test_policy_tunnel_kernel_race_rejected(self):
+        _, _, expected, observed = self.tunnel_fixture()
+        self.address_views[1] = self.address_views[1].replace(b'fc00::2', b'fc00::3')
+        with patch('checks.baseline', return_value=expected), patch('checks.policy', return_value=observed):
+            with self.assertRaisesRegex(Failure, 'mullvad_interface_changed_during_check'):
+                checks.policy_gate(self.ctx)
+
+    @logged
+    def test_tunnel_interface_schema_rejects_ambiguous_or_wrong_family(self):
+        self.tunnel_fixture()
+        value = json.loads(self.address_views[0])
+        for invalid in ([], {}, value*2, [dict(value[0], ifname='other')],
+                        [dict(value[0], flags=[])], [dict(value[0], addr_info=value[0]['addr_info'][:1])],
+                        [dict(value[0], addr_info=value[0]['addr_info']*2)],
+                        [dict(value[0], addr_info=[dict(value[0]['addr_info'][0], flags=['tentative']),
+                                                  value[0]['addr_info'][1]])]):
+            with self.assertRaises(Failure): checks.tunnel_addresses(json.dumps(invalid).encode())
+
+
+
+
+    @logged
+    def prepare_forward_pending(self, count=5):
+        atomic(self.paths.state / "alerts-forwarded.json", '{"sent":[]}\n', 0o600)
+        atomic(self.paths.state / "alerts.jsonl", ''.join(
+            json.dumps({"id": f"a{i}", "kind": f"a{i}"})+'\n' for i in range(count)), 0o640)
+
+    @logged
+    def test_forward_sigterm_does_not_replay_completed_handoff(self):
+        import signal
+        self.prepare_forward_pending(2)
+        script = """
+import sys, os, signal, subprocess
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from core import Context, Paths, logged, trace_quiet
+import telemetry
+trace_quiet()
+calls = []
+@logged
+def sender(argv, **kwargs):
+    calls.append(1)
+    if len(calls) == 2:
+        os.kill(os.getpid(), signal.SIGTERM)
+    return subprocess.CompletedProcess(argv, 0, b'', b'')
+telemetry.forward(Context(Paths(state=Path(sys.argv[2])), sender, require_root=False))
+"""
+        result = subprocess.run(['/usr/bin/python3', '-I', '-B', '-c', script,
+                                 str(Path(__file__).resolve().parent), str(self.paths.state)],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, -signal.SIGTERM)
+        self.assertEqual(json.loads((self.paths.state/'alerts-forwarded.json').read_text())['sent'], ['a0'])
+        sent = []
+        @logged
+        def sender(argv, **kwargs):
+            sent.append(json.loads(kwargs['input'])['output'])
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        with patch.object(self.ctx, 'runner', sender), contextlib.redirect_stdout(io.StringIO()):
+            telemetry.forward(self.ctx)
+        self.assertEqual(len(sent), 1)
+        self.assertIn('a1', sent[0])
+
+    @logged
+    def test_forward_budget_leaves_checkpoint_and_retryable_backlog(self):
+        self.prepare_forward_pending(5)
+        clock, timeouts = [0.], []
+        @logged
+        def sender(argv, **kwargs):
+            timeouts.append(kwargs['timeout'])
+            clock[0] += kwargs['timeout']
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        with patch('telemetry.time.monotonic', side_effect=lambda: clock[0]), \
+                patch.object(self.ctx, 'runner', sender), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(Failure, 'alert_forward_budget_pending'):
+                telemetry.forward(self.ctx)
+        self.assertEqual(timeouts, [30, 30, 25])
+        self.assertLess(clock[0], 120)
+        self.assertEqual(json.loads((self.paths.state/'alerts-forwarded.json').read_text())['sent'],
+                         ['a0', 'a1', 'a2'])
+
+    @logged
+    def test_forward_timeout_checkpoints_prior_success_and_continues(self):
+        self.prepare_forward_pending(2)
+        @logged
+        def sender(argv, **kwargs):
+            if 'a1' in json.loads(kwargs['input'])['output']:
+                raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        with patch.object(self.ctx, 'runner', sender), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(Failure, 'alert_forward_failed:count=1'):
+                telemetry.forward(self.ctx)
+        self.assertEqual(json.loads((self.paths.state/'alerts-forwarded.json').read_text())['sent'], ['a0'])
+
+    @logged
+    def test_forward_invalid_checkpoint_fails_before_sender(self):
+        self.prepare_forward_pending(1)
+        for value in ('{}', '[]', '{"sent":"bad"}', '{"sent":[1]}', '{"sent":["a","a"]}'):
+            atomic(self.paths.state/'alerts-forwarded.json', value)
+            with patch.object(self.ctx, 'run') as sender:
+                with self.assertRaisesRegex(Failure, 'alerts_forwarded_state_invalid'):
+                    telemetry.forward(self.ctx)
+                sender.assert_not_called()
+
+    @logged
+    def test_variable_metric_rows_compact_by_count_not_latest_size(self):
+        for last_big in (False, True):
+            name = 'big-last.jsonl' if last_big else 'small-last.jsonl'
+            for i in range(7):
+                telemetry.append(self.ctx, name, {'i':i, 'x':'X'*(5000 if (i==6)==last_big else 1)}, keep=5)
+            self.assertEqual([r['i'] for r in telemetry.rows(self.ctx, name)], [2,3,4,5,6])
+
+    @logged
+    def test_append_parallel_calls_serialised_without_lost_rows(self):
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda i: telemetry.append(self.ctx, 'parallel.jsonl', {'i':i}), range(40)))
+        self.assertEqual(sorted(r['i'] for r in telemetry.rows(self.ctx, 'parallel.jsonl')), list(range(40)))
+
+    @logged
+    def test_stats_skips_invalid_timestamps_not_corrupt_json(self):
+        from core import timestamp
+        values = [{'ts':timestamp(), 'up':1, 'peers':[]}, {'ts':'invalid'}, {}, {'ts':'2026-10-18'}]
+        atomic(self.paths.state/'metrics.jsonl', ''.join(json.dumps(r)+'\n' for r in values))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): telemetry.stats(self.ctx, 1)
+        self.assertIn('samples=1 unknown_records=0 invalid_records=3', out.getvalue())
+        atomic(self.paths.state/'metrics.jsonl', '{invalid}\n')
+        with self.assertRaisesRegex(Failure, 'corrupt_metric_record'): telemetry.stats(self.ctx)
+        atomic(self.paths.state/'metrics.jsonl', '{"ts":"invalid"}\n')
+        with self.assertRaisesRegex(Failure, 'no_samples_in_window:invalid_records=1'): telemetry.stats(self.ctx)
+
+    @logged
+    def test_watch_transient_failure_keeps_unknown_and_continues(self):
+        out = io.StringIO()
+        ps = [{'up':True}]
+        with patch('telemetry.peers', side_effect=[Failure('synthetic'), ps, ps, ps, ps]), \
+                patch('telemetry.time.sleep') as sleep, contextlib.redirect_stdout(out):
+            with self.assertRaisesRegex(Failure, 'watch_samples_failed:count=1'):
+                telemetry.watch(self.ctx, 3, 1)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertIn('[1/3] node_up=unknown stack_up=unknown errors=1', out.getvalue())
+        self.assertIn('[3/3] node_up=1 stack_up=1 errors=1', out.getvalue())
+        self.assertIn('processed=3 errors=1', out.getvalue())
+
+    @logged
+    def test_wait_peers_respects_desired_and_paired_health(self):
+        up = [{'remote': URI.replace('192.0.2.1', f'192.0.2.{i}'), 'up':True} for i in (1,2)]
+        desired = '192.0.2.1:443'
+        with patch('management.peers', return_value=up):
+            management.wait_peers(self.ctx, desired, seconds=0)
+            with self.assertRaisesRegex(Failure, 'peer_convergence_timeout'):
+                management.wait_peers(self.ctx, '192.0.2.3:443', seconds=0)
+            with self.assertRaisesRegex(Failure, 'peer_convergence_timeout'):
+                management.wait_peers(self.ctx, desired, seconds=0, absent=True)
+            management.wait_peers(self.ctx, '192.0.2.3:443', seconds=0, absent=True)
+        with patch('management.peers', side_effect=lambda ctx, stack: [] if stack else up):
+            with self.assertRaisesRegex(Failure, 'peer_convergence_timeout'):
+                management.wait_peers(self.ctx, seconds=0)
+
+    @logged
+    def test_mutation_lock_timeout_releases_depth_and_fd(self):
+        with patch('core.fcntl.flock', side_effect=BlockingIOError), \
+                patch('core.time.monotonic', side_effect=[0.,21.]), patch('core.time.sleep'):
+            with self.assertRaisesRegex(Failure, 'mutation_lock_timeout'):
+                with self.ctx.locked(): self.fail('must not enter')
+        self.assertEqual(self.ctx.lock_depth, 0)
+        with self.ctx.locked(): self.assertEqual(self.ctx.lock_depth, 1)
+        self.assertEqual(self.ctx.lock_depth, 0)
+
+
+    @logged
+    def test_append_new_error_paths_fail_closed(self):
+        import stat
+        import types
+        for keep in (0, True, 10001, '2'):
+            with self.assertRaisesRegex(Failure, 'invalid_metric_retention'):
+                telemetry.append(self.ctx, 'error.jsonl', {}, keep=keep)
+        with patch('telemetry.os.write', return_value=0):
+            with self.assertRaisesRegex(Failure, 'metric_append_no_progress'):
+                telemetry.append(self.ctx, 'error.jsonl', {})
+        with patch('telemetry.os.pread', return_value=b''):
+            with self.assertRaisesRegex(Failure, 'metric_file_changed_during_count'):
+                telemetry.metric_records(-1, 1)
+        # Preserve _locked's real fstat; only append's metric descriptor is changed.
+        original = os.fstat
+        @logged
+        def oversize(fd):
+            info = original(fd)
+            if (self.paths.state/'error.jsonl').stat().st_ino == info.st_ino:
+                return types.SimpleNamespace(st_mode=stat.S_IFREG, st_size=32*1024*1024)
+            return info
+        with patch('telemetry.os.fstat', side_effect=oversize):
+            with self.assertRaisesRegex(Failure, 'metric_file_size_limit'):
+                telemetry.append(self.ctx, 'error.jsonl', {})
+        self.assertEqual((self.paths.state/'error.jsonl').read_bytes(), b'')
+
+    @logged
+    def test_forward_budget_includes_lock_wait(self):
+        self.prepare_forward_pending(5)
+        clock, timeouts = [0.], []
+        locked = self.ctx.locked
+        @contextlib.contextmanager
+        @logged
+        def delayed_lock():
+            clock[0] += 20
+            with locked(): yield
+        @logged
+        def sender(argv, **kwargs):
+            timeouts.append(kwargs['timeout'])
+            clock[0] += kwargs['timeout']
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        with patch('telemetry.time.monotonic', side_effect=lambda: clock[0]), \
+                patch.object(self.ctx, 'locked', delayed_lock), patch.object(self.ctx, 'runner', sender), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(Failure, 'alert_forward_budget_pending'):
+                telemetry.forward(self.ctx)
+        self.assertEqual(timeouts, [30,30,5])
+        self.assertEqual(clock[0], 85)
+
+    @logged
+    def test_forward_bad_alert_ids_rejected_and_initial_duplicates_coalesced(self):
+        for aid in ('', 'a'*129, 12, None):
+            with self.assertRaisesRegex(Failure, 'invalid_alert_id'):
+                telemetry.alert_id({'id':aid})
+        alert = {'kind':'synthetic'}
+        atomic(self.paths.state/'alerts.jsonl', (json.dumps(alert)+'\n')*2)
+        with contextlib.redirect_stdout(io.StringIO()): telemetry.forward(self.ctx)
+        sent = json.loads((self.paths.state/'alerts-forwarded.json').read_text())['sent']
+        self.assertEqual(len(sent), 1)
+        with patch.object(self.ctx, 'run') as sender, contextlib.redirect_stdout(io.StringIO()):
+            telemetry.forward(self.ctx)
+            sender.assert_not_called()
 
 
 @logged

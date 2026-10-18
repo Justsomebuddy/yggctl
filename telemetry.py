@@ -30,34 +30,60 @@ def rows(ctx, name="metrics.jsonl"):
 
 
 @logged
+def metric_records(fd, size):
+    """Count newlines in bounded chunks, without decoding every JSON record.
+
+    A cached counter would need a crash/inode-coherent second durable state file.
+    The <=32 MiB sequential cached scan is simpler and measurable at minute cadence.
+    """
+    count, offset = 0, 0
+    while offset < size:
+        data = os.pread(fd, min(1 << 20, size - offset), offset)
+        if not data:
+            raise Failure("metric_file_changed_during_count")
+        count += data.count(b"\n")
+        offset += len(data)
+    return count
+
+
+@logged
 def append(ctx, name, row, keep=10000):
-    """Append one row. The file is rewritten to the newest `keep` rows only once it has
-    grown about 20 % past them (about every 1.4 days for the minute collector), not on
-    every sample."""
+    """Compact at >120% of `keep` RECORDS, independent of the last row's size."""
+    if type(keep) is not int or not 1 <= keep <= 10000:
+        raise Failure("invalid_metric_retention")
     path = ctx.p.state / name
     line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
-    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o640)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode): raise Failure("metric_file_not_regular")
-        if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
-            # Drop a line torn by a crash before appending after it.
-            tail = os.pread(fd, min(info.st_size, 1 << 20), max(0, info.st_size - (1 << 20)))
-            cut = tail.rfind(b"\n")
-            if cut < 0 and info.st_size > len(tail): raise Failure("corrupt_metric_tail")
-            os.ftruncate(fd, info.st_size - len(tail) + cut + 1)
-        view = memoryview(line)
-        while view:
-            view = view[os.write(fd, view):]
-        os.fsync(fd)
-        size = os.fstat(fd).st_size
-    finally:
-        os.close(fd)
-    os.chown(path, -1, ctx.p.state.stat().st_gid)
-    if size > len(line) * keep * 6 // 5:
-        values = rows(ctx, name)
-        atomic(path, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]), 0o640)
+    with ctx.locked():
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o640)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise Failure("metric_file_not_regular")
+            if info.st_size + len(line) > 32 * 1024 * 1024:
+                raise Failure("metric_file_size_limit")
+            if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
+                tail = os.pread(fd, min(info.st_size, 1 << 20), max(0, info.st_size - (1 << 20)))
+                cut = tail.rfind(b"\n")
+                if cut < 0 and info.st_size > len(tail):
+                    raise Failure("corrupt_metric_tail")
+                os.ftruncate(fd, info.st_size - len(tail) + cut + 1)
+                event("state", "metric_append", "torn_tail_removed")
+            view = memoryview(line)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise Failure("metric_append_no_progress")
+                view = view[written:]
+            os.fsync(fd)
+            count = metric_records(fd, os.fstat(fd).st_size)
+        finally:
+            os.close(fd)
         os.chown(path, -1, ctx.p.state.stat().st_gid)
+        if count > keep * 6 // 5:
+            values = rows(ctx, name)
+            atomic(path, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]), 0o640)
+            os.chown(path, -1, ctx.p.state.stat().st_gid)
+            event("state", "metric_append", "compacted_by_record_count")
 
 
 @logged
@@ -183,7 +209,9 @@ MESSAGES = {
 
 @logged
 def alert_id(alert):
-    if isinstance(alert.get("id"), str):
+    if "id" in alert:
+        if not isinstance(alert["id"], str) or not 1 <= len(alert["id"]) <= 128:
+            raise Failure("invalid_alert_id")
         return alert["id"]
     return hashlib.sha256(json.dumps(alert, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -202,38 +230,75 @@ def alert_message(alert):
             "time": str(alert.get("ts", ""))[:40]}
 
 
+FORWARD_BUDGET = 90  # includes acquisition of the shared 20 s lock; unit timeout is 120 s
+FORWARD_RESERVE = 5  # normal local checkpoint/exit time, not a guarantee under hung storage
+
+
 @logged
 def forward(ctx):
-    """Hand new alerts to the root-owned SimpleX sender; history is never re-sent."""
+    """Per-success durable handoff, NOT exactly-once delivery or a human ACK.
+
+    SIGTERM/crash between sender success and fsync can still cause a duplicate.
+    Existing sender rc0 may mean its rate-limit suppression, not actual delivery.
+    """
+    start = time.monotonic()
+    deadline = start + FORWARD_BUDGET
     ctx.root()
     with ctx.locked():
         alerts = rows(ctx, "alerts.jsonl")
         ids = [alert_id(a) for a in alerts]
         raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
         if raw is None:
-            atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": ids[-2000:]}) + "\n", 0o600)
-            print(f"[1/1] forwarding initialised; {len(ids)} earlier alerts not sent")
+            atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n", 0o600)
+            print(f"[1/1] forwarding initialised; processed={len(ids)} earlier alerts not sent; errors=0 "
+                  f"remaining=0 elapsed={time.monotonic()-start:.2f}s")
             return
         try:
-            sent = json.loads(raw).get("sent", [])
-        except (ValueError, AttributeError):
+            sent = json.loads(raw)["sent"]
+            if (not isinstance(sent, list) or len(sent) > 2000
+                    or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
+                    or len(set(sent)) != len(sent)):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
             raise Failure("alerts_forwarded_state_invalid") from None
-        done, failures, new = set(sent), 0, 0
-        for alert, aid in zip(alerts, ids):
+        done, failures, processed = set(sent), 0, 0
+        pending = [(a, aid) for a, aid in zip(alerts, ids) if aid not in done]
+        for alert, aid in pending:
             if aid in done:
                 continue
-            new += 1
-            r = ctx.run([SENDER], input=json.dumps(alert_message(alert), ensure_ascii=False).encode(),
-                        timeout=30, check=False)
-            if r.returncode == 0:
+            remaining = deadline - time.monotonic() - FORWARD_RESERVE
+            if remaining < 5:
+                event("state", "alert_forward", "budget_exhausted_retry_required")
+                break
+            processed += 1
+            try:
+                result = ctx.run([SENDER], input=json.dumps(alert_message(alert), ensure_ascii=False).encode(),
+                                 timeout=min(30, remaining), check=False)
+                success = result.returncode == 0
+            except Failure:
+                success = False
+            if success:
                 done.add(aid)
+                # Do not defer this commit until a later message/normal process exit.
+                kept = list(dict.fromkeys(i for i in ids if i in done))[-2000:]
+                atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": kept}) + "\n", 0o600)
+                event("state", "alert_forward", "sender_rc0_checkpointed")
             else:
                 failures += 1
-        kept = [i for i in ids if i in done][-2000:]
-        atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": kept}) + "\n", 0o600)
-        print(f"[1/1] alerts forwarded; processed={new} errors={failures}")
+                event("error", "alert_forward", "sender_failed_pending")
+            elapsed = time.monotonic() - start
+            print(f"[{processed}/{len(pending)}] sender handoff; processed={processed} errors={failures} "
+                  f"remaining={len(pending)-processed} elapsed={elapsed:.2f}s "
+                  f"ETA<={max(0, deadline-time.monotonic()):.1f}s "
+                  f"speed={processed/max(.001, elapsed):.2f}/s", flush=True)
+        left = sum(aid not in done for aid in set(ids))
+        print(f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
+              f"elapsed={time.monotonic()-start:.2f}s; sender rc0 is NOT delivery/human ACK")
         if failures:
             raise Failure(f"alert_forward_failed:count={failures}")
+        if left:
+            # Existing Restart=on-failure schedules backlog even without a new path event.
+            raise Failure("alert_forward_budget_pending")
 
 
 @logged
@@ -281,25 +346,30 @@ def collect(ctx):
 def window(ctx, hours=24):
     now = dt.datetime.now(dt.timezone.utc)
     start = now - dt.timedelta(hours=hours)
-    found = []
+    found, invalid = [], 0
     for r in rows(ctx):
         try:
             at = dt.datetime.fromisoformat(r["ts"])
             if at.tzinfo is None: raise ValueError()
-        except (KeyError, ValueError, TypeError): raise Failure("metric_timestamp_invalid") from None
+        except (KeyError, ValueError, TypeError):
+            invalid += 1
+            event("state", "metric_window", "invalid_timestamp_skipped")
+            continue
         if start <= at <= now: found.append((at, r))
-    if not found: raise Failure("no_samples_in_window")
-    return sorted(found, key=lambda x: x[0])
+    if not found:
+        raise Failure(f"no_samples_in_window:invalid_records={invalid}")
+    return sorted(found, key=lambda x: x[0]), invalid
 
 
 @logged
 def stats(ctx, hours=24, graph=False):
-    values = window(ctx, hours)
+    values, invalid = window(ctx, hours)
     unknown = sum(r.get("up") is None or bool(r.get("errors")) for _, r in values)
     gaps = sum(max(0, round((b[0]-a[0]).total_seconds()/60)-1) for a, b in zip(values, values[1:]))
     names = sorted({p["r"] for _, r in values for p in r.get("peers", [])})
     print(f"window={hours}h samples={len(values)} unknown_records={unknown} "
-          f"missing_minutes_between_samples={gaps}; observed availability is NOT wall-clock uptime")
+          f"invalid_records={invalid} missing_minutes_between_samples={gaps}; "
+          f"observed availability is NOT wall-clock uptime")
     for name in names:
         matches = [next((p for p in r.get("peers", []) if p["r"] == name), None) for _, r in values]
         known = [p for p in matches if p is not None]
@@ -324,10 +394,20 @@ def stats(ctx, hours=24, graph=False):
 
 @logged
 def watch(ctx, count=5, interval=2):
-    start = time.monotonic()
+    start, errors = time.monotonic(), 0
     for i in range(count):
-        print(f"[{i+1}/{count}] node_up={sum(p['up'] for p in peers(ctx))} "
-              f"stack_up={sum(p['up'] for p in peers(ctx, True))} elapsed={time.monotonic()-start:.1f}s "
-              f"ETA={(count-i-1)*interval}s speed=1/{interval}s remaining={count-i-1}", flush=True)
-        if i+1 < count: time.sleep(interval)
-    print(f"processed={count} errors=0 elapsed={time.monotonic()-start:.1f}s")
+        try:
+            node = sum(p['up'] for p in peers(ctx))
+            stack = sum(p['up'] for p in peers(ctx, True))
+        except (Failure, OSError, ValueError, KeyError):
+            node = stack = "unknown"
+            errors += 1
+            event("error", "watch_sample", "unavailable_unknown")
+        print(f"[{i+1}/{count}] node_up={node} stack_up={stack} errors={errors} "
+              f"elapsed={time.monotonic()-start:.1f}s ETA={(count-i-1)*interval}s "
+              f"speed=1/{interval}s remaining={count-i-1}", flush=True)
+        if i+1 < count:
+            time.sleep(interval)
+    print(f"processed={count} errors={errors} elapsed={time.monotonic()-start:.1f}s")
+    if errors:
+        raise Failure(f"watch_samples_failed:count={errors}")

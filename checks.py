@@ -262,8 +262,8 @@ def quic_relay(data):
 
 
 @logged
-def relay_display(reference, current, relay):
-    """Replace ONLY three reviewed endpoint slots; every other byte stays exact.
+def relay_display(reference, current, relay, tunnel=None):
+    """Replace three relay slots and optional two INPUT slots; all other bytes exact.
 
     No nft parsing/canonicalization: order, ports, marks, interfaces and verdicts
     remain significant. The caller must first anchor reference to the old SHA.
@@ -291,7 +291,63 @@ def relay_display(reference, current, relay):
             raise ValueError
     except (ValueError, UnicodeError, AttributeError):
         raise Failure("invalid_mullvad_relay_address") from None
-    return reference.replace(old, relay) == current
+    candidate = reference.replace(old, relay)
+    if tunnel is not None:
+        if not isinstance(tunnel, tuple) or len(tunnel) != 2 or any(not isinstance(a, str) for a in tunnel):
+            raise Failure("unsupported_mullvad_tunnel_address")
+        # Anchor slots to the INPUT chain of the accepted reference, not arbitrary drop rules.
+        marker = b"\tchain input {\n"
+        if reference.count(marker) != 1: raise Failure("unsupported_mullvad_tunnel_slots")
+        body = reference.split(marker, 1)[1].split(b"\t}\n", 1)[0]
+        for family, address in zip((b"ip", b"ip6"), tunnel, strict=True):
+            pattern = rb"(?m)^\t\t" + family + rb" daddr ([0-9a-f:.]+) drop\n"
+            matches = list(re.finditer(pattern, reference))
+            if len(matches) != 1 or matches[0][0] not in body:
+                raise Failure("unsupported_mullvad_tunnel_slots")
+            previous = matches[0][1]
+            try:
+                version = 4 if family == b"ip" else 6
+                for value in (previous.decode("ascii"), address):
+                    parsed = ipaddress.ip_address(value)
+                    network = "10.0.0.0/8" if version == 4 else "fc00::/7"
+                    if parsed.version != version or str(parsed) != value or parsed not in ipaddress.ip_network(network):
+                        raise ValueError
+            except (ValueError, UnicodeError, TypeError):
+                raise Failure("unsupported_mullvad_tunnel_address") from None
+            candidate = candidate.replace(matches[0][0], b"\t\t" + family + b" daddr " +
+                                          address.encode("ascii") + b" drop\n", 1)
+    return candidate == current
+
+
+@logged
+def tunnel_addresses(data):
+    """Independent kernel observation, not addresses learned from the nft table."""
+    if not isinstance(data, bytes) or len(data) > 65536:
+        raise Failure("unsupported_mullvad_interface_addresses")
+    try:
+        rows = json.loads(data)
+        if not isinstance(rows, list) or len(rows) != 1: raise ValueError
+        row = rows[0]
+        if (row["ifname"] != "wg0-mullvad" or not isinstance(row["flags"], list)
+                or "UP" not in row["flags"]): raise ValueError
+        found = {"inet": [], "inet6": []}
+        for addr in row["addr_info"]:
+            if addr.get("scope") != "global": continue
+            family = addr["family"]
+            if (family not in found or any(addr.get(f) for f in ("tentative", "dadfailed", "deprecated"))
+                    or not isinstance(addr.get("flags", []), list)
+                    or any(f in addr.get("flags", []) for f in ("tentative", "dadfailed", "deprecated"))):
+                raise ValueError
+            ip = ipaddress.ip_address(addr["local"])
+            version = 4 if family == "inet" else 6
+            network = "10.0.0.0/8" if version == 4 else "fc00::/7"
+            if (ip.version != version or str(ip) != addr["local"] or ip not in ipaddress.ip_network(network)
+                    or addr.get("valid_life_time", 1) == 0): raise ValueError
+            found[family].append(str(ip))
+        if any(len(values) != 1 for values in found.values()): raise ValueError
+        return found["inet"][0], found["inet6"][0]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise Failure("unsupported_mullvad_interface_addresses") from None
 
 
 @logged
@@ -309,10 +365,17 @@ def nft_relay_gate(ctx, expected, observed):
     if digest(current) != observed:
         raise Failure("mullvad_display_changed_during_check")
     if not relay_display(reference, current, relay):
-        raise Failure("policy_baseline_drift_do_not_auto_accept")
+        command = ["/usr/sbin/ip", "-j", "addr", "show", "dev", "wg0-mullvad"]
+        before = tunnel_addresses(ctx.run(command).stdout)
+        current = ctx.run(["/usr/sbin/nft", "list", "table", "inet", "mullvad"]).stdout
+        if digest(current) != observed: raise Failure("mullvad_display_changed_during_check")
+        if not relay_display(reference, current, relay, before):
+            raise Failure("policy_baseline_drift_do_not_auto_accept")
+        if tunnel_addresses(ctx.run(command).stdout) != before:
+            raise Failure("mullvad_interface_changed_during_check")
     if quic_relay(ctx.run(["/usr/bin/mullvad", "status", "--json"]).stdout) != relay:
         raise Failure("mullvad_relay_changed_during_check")
-    event("state", "mullvad_policy", "legacy_anchored_local_quic_relay_only")
+    event("state", "mullvad_policy", "legacy_anchored_local_quic_and_tunnel_addresses")
 
 
 @logged

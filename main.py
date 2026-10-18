@@ -30,7 +30,9 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
 Метрики:      collect, stats [часы], graph [часы], watch/top [N] [секунды], report, peers-score,
               notify on|off|show|test, alerts-forward
 Управление:   start, stop, restart, enable, disable (с приставкой stack- — для стека),
+              stack-start, stack-stop, stack-restart, stack-enable, stack-disable;
               add-peer URI [--force] [--apply], remove-peer IPv4:порт [--apply],
+              add-peer принимает только IPv4-литерал и обязательный ?key=HEX64; меняет оба инстанса.
               mode direct|tunnel [--apply], recover-transaction [--apply].
               Без --apply изменение только показывается.
 Восстановление: snapshot, diff [файл], backup [--full --recipient ОТПЕЧАТОК], restore ФАЙЛ [--apply], doctor
@@ -45,6 +47,7 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
 Закрыто:      nameserver и timer — только show; purge, rotate-key, chaos, upgrade, baseline-update
               отключены до отдельного ревью. Установка — scripts/deployment/deploy.sh.
 Без sudo:     help, version, update-check, stats, graph.
+Самотест:     selftest и selftest offline требуют sudo; stats/graph — читаемый файл метрик.
 Песочница:    research, atlas и команды сети Yggdrasil работают от пользователя ygglab-worker без
               root и без ключей; у research нет сети, у сетевых команд — только localhost.
 Тревоги:      пир недоступен 10+ минут, нестабилен (3+ разрыва за час) или вернулся, сбой ноды —
@@ -349,15 +352,51 @@ def do_atlas(ctx, args, a):
 
 
 @logged
+def journal_records(data):
+    """Project JSON journal records; never expose raw records or partial secret values.
+
+    A MESSAGE is the redaction boundary, including multiline/PEM contents. Dropping
+    the whole sensitive message avoids guessing where a quoted value ends. Only a
+    fixed unit label and a numeric timestamp are projected from journal metadata.
+    """
+    records = []
+    for line in data.splitlines():
+        try:
+            row = json.loads(line)
+            if not isinstance(row, dict): raise ValueError
+            message = row.get("MESSAGE")
+            if not isinstance(message, str):
+                message = "[non-text journal message omitted]"
+            probe = message
+            # Decode nested JSON-style unicode escaping for detection only, never output it.
+            for _ in range(4):
+                probe = re.sub(r"\\u([0-9a-fA-F]{4})", unicode_escape, probe)
+            if (re.search(r"(?i)private[\s_-]*key|group[\s_-]*password|password|token|secret|authorization",
+                          probe) or re.search(r"\\u[0-9a-fA-F]{4}", probe)):
+                message = "[REDACTED sensitive journal message]"
+                event("state", "journal_redaction", "message_omitted")
+            unit = row.get("_SYSTEMD_UNIT")
+            at = row.get("__REALTIME_TIMESTAMP", "")
+            records.append({"unit": unit if unit in (NODE, STACK) else "unknown",
+                            "timestamp_us": at if isinstance(at, str) and re.fullmatch(r"[0-9]{1,20}", at)
+                            else "unknown", "message": message})
+        except (ValueError, TypeError, RecursionError):
+            raise Failure("invalid_journal_json_no_raw_output") from None
+    return records
+
+
+@logged
+def unicode_escape(match):
+    return chr(int(match[1], 16))
+
+
+@logged
 def do_logs(ctx, args, a):
     n = bounded_number(a[0], 1, 1000) if a else 50
-    command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-n", str(n)]
+    command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-o", "json", "-n", str(n)]
     if args.command == "events":
         command += ["--since", f"{bounded_number(a[0], 1, 72) if a else 6} hours ago"]
-    value = ctx.run(command).stdout.decode(errors="replace")
-    # JSON presentation escapes terminal controls; known secret-shaped assignments masked.
-    value = re.sub(r"(?i)(privatekey|password|token|secret)\s*[:=]\s*\S+", r"\1=[REDACTED]", value)
-    output({"logs": value})
+    output({"logs": journal_records(ctx.run(command).stdout)})
 
 
 @logged

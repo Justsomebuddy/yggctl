@@ -4,7 +4,7 @@ import checks
 from .store import Store
 from . import catalogue, acquisition
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 
 
 @logged
