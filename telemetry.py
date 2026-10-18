@@ -191,14 +191,15 @@ def reconnects(starts, unstable, uptimes, now, peers, up, total, changes):
 
 
 SENDER = "/usr/local/bin/simplex-alert.sh"
+# The sender suppresses repeats within 300 s by priority and rule, so a peer alert names its peer in the rule.
 MESSAGES = {
-    "ygg-peer-down": ("Yggdrasil: пир недоступен", "Warning",
+    "ygg-peer-down": ("Yggdrasil: пир {peer} недоступен", "Warning",
                       "Нода yggdrasil-lab: пир {peer} недоступен {minutes} мин; на связи {up} из {total}. "
                       "Проверка: sudo yggctl peers"),
-    "ygg-peer-unstable": ("Yggdrasil: пир нестабилен", "Warning",
+    "ygg-peer-unstable": ("Yggdrasil: пир {peer} нестабилен", "Warning",
                           "Нода yggdrasil-lab: пир {peer} нестабилен — {count} разрывов за последний час; "
                           "на связи {up} из {total}. Проверка: sudo yggctl peers"),
-    "ygg-peer-up": ("Yggdrasil: пир снова на связи", "Warning",
+    "ygg-peer-up": ("Yggdrasil: пир {peer} снова на связи", "Warning",
                     "Нода yggdrasil-lab: пир {peer} снова на связи после {minutes} мин; на связи {up} из {total}."),
     "ygg-health": ("Yggdrasil: сбой ноды", "Error",
                    "Нода yggdrasil-lab: {errors}. Проверка: sudo yggctl check"),
@@ -222,6 +223,10 @@ def alert_message(alert):
     rule, priority, text = MESSAGES.get(alert.get("kind"), default)
     fields = {k: str(v)[:120] for k, v in alert.items() if k in ("peer", "minutes", "up", "total", "kind", "count")}
     fields["errors"] = ", ".join(str(e)[:60] for e in alert.get("errors", [])[:5]) or "неизвестно"
+    try:
+        rule = rule.format(**fields)
+    except KeyError:
+        rule = rule.replace(" {peer}", "")
     try:
         output = text.format(**fields)
     except KeyError:
@@ -249,7 +254,8 @@ def forward(ctx):
         ids = [alert_id(a) for a in alerts]
         raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
         if raw is None:
-            atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n", 0o600)
+            atomic(ctx.p.state / "alerts-forwarded.json",
+                   json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n", 0o600)
             print(f"[1/1] forwarding initialised; processed={len(ids)} earlier alerts not sent; errors=0 "
                   f"remaining=0 elapsed={time.monotonic()-start:.2f}s")
             return

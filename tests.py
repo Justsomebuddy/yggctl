@@ -999,8 +999,31 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(telemetry.peer_alerts(self.ctx, sample(30), {URI: 10}), [])  # no repeat within 6 h
         self.assertEqual(telemetry.peer_alerts(self.ctx, sample(95), {URI: 3500}), [])  # old drops aged out
         message = telemetry.alert_message(alerts[0])
-        self.assertEqual(message["rule"], "Yggdrasil: пир нестабилен")
+        self.assertEqual(message["rule"], f"Yggdrasil: пир {URI} нестабилен")
         self.assertIn("3 разрывов за последний час", message["output"])
+
+    @logged
+    def test_peer_alert_rule_names_peer(self):
+        # The sender suppresses repeats within 300 s by priority and rule[:160]: peers must not share a rule.
+        other, long_peer = "tls://192.0.2.7:443", "tls://" + "a" * 200
+        for kind, tail in (("ygg-peer-down", "недоступен"), ("ygg-peer-unstable", "нестабилен"),
+                           ("ygg-peer-up", "снова на связи")):
+            alert = {"kind": kind, "peer": URI, "minutes": 10, "count": 3, "up": 5, "total": 6}
+            first, again = telemetry.alert_message(alert), telemetry.alert_message(dict(alert))
+            second = telemetry.alert_message(dict(alert, peer=other))
+            self.assertEqual(first["rule"], f"Yggdrasil: пир {URI} {tail}")
+            self.assertEqual(first["rule"], again["rule"])
+            self.assertEqual(first["priority"], second["priority"])
+            self.assertNotEqual(first["rule"][:160], second["rule"][:160])
+            lengthy = telemetry.alert_message(dict(alert, peer=long_peer))["rule"]
+            self.assertLessEqual(len(lengthy), 160)
+            self.assertIn(long_peer[:120], lengthy)
+            bare = {k: v for k, v in alert.items() if k != "peer"}
+            self.assertEqual(telemetry.alert_message(bare)["rule"], f"Yggdrasil: пир {tail}")
+        self.assertEqual(telemetry.alert_message({"kind": "ygg-health", "errors": ["node_inactive"]})["rule"],
+                         "Yggdrasil: сбой ноды")
+        self.assertEqual(telemetry.alert_message({"kind": "labelled-local-selftest"})["rule"],
+                         "Yggdrasil: проверка доставки тревог")
 
     @logged
     def test_alerts_forward_once_and_retry_failures(self):
@@ -1026,7 +1049,7 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         message = sent[-1]
         self.assertEqual((message["rule"], message["priority"], message["source"]),
-                         ("Yggdrasil: пир недоступен", "Warning", "yggctl"))
+                         (f"Yggdrasil: пир {URI} недоступен", "Warning", "yggctl"))
         self.assertIn(URI, message["output"])
         self.assertIn("12 мин", message["output"])
         self.assertLessEqual(len(message["output"]), 300)
