@@ -1,0 +1,45 @@
+name: Regression tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Python syntax
+        run: |
+          echo '[1/2] Python syntax'
+          python3 -B -c 'import ast, pathlib; files = sorted(pathlib.Path("yggctl").rglob("*.py")); [ast.parse(p.read_text(), filename=str(p)) for p in files]; print(f"processed={len(files)}/{len(files)} errors=0 remaining=0")'
+      - name: Python regression suites
+        working-directory: yggctl
+        run: |
+          start=$SECONDS
+          echo '[2/2] Console, research and atlas regression suites'
+          python3 -B tests.py
+          python3 -B -c 'from research.tests import run_suite; run_suite()'
+          python3 -B -c 'from atlas.tests import run_suite; run_suite()'
+          echo "[done] processed=3/3 suites errors=0 remaining=0 elapsed=$((SECONDS-start))s"

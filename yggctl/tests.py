@@ -30,6 +30,17 @@ URI = "tls://192.0.2.1:443?key=" + PIN + "&maxbackoff=30s"
 
 class ConsoleTests(unittest.TestCase):
     @logged
+    def test_fixture_does_not_depend_on_checkout_location(self):
+        other = type(self)("test_peer_canonical")
+        try:
+            with patch.dict(globals(), {"__file__": "/outside-work/tests.py"}):
+                other.setUp()
+            self.assertTrue(Path(other.tmp.name).is_dir())
+            self.assertNotEqual(Path(other.tmp.name).parent, Path("/var/lib/yggdrasil-lab/selftests"))
+        finally:
+            other.doCleanups()
+
+    @logged
     def test_offline_root_gate_precedes_fixture_creation(self):
         ctx = Context(require_root=True)
         with patch("core.os.geteuid", return_value=1000), patch("tests.run_suite") as suite:
@@ -39,10 +50,8 @@ class ConsoleTests(unittest.TestCase):
 
     @logged
     def setUp(self):
-        here = Path(__file__).resolve().parent
-        folder = here.parents[1] / "data" / "console-fix-20261013" / "tests" if "/Work/" in str(here) else Path("/var/lib/yggdrasil-lab/selftests")
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.tmp = tempfile.TemporaryDirectory(dir=folder)
+        self.tmp = tempfile.TemporaryDirectory(prefix="yggctl-test-")
+        self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         self.paths = Paths(etc=root/"etc", units=root/"units", state=root/"state", runtime=root/"runtime",
                            node_sock=root/"run/node/admin.sock", stack_sock=root/"run/stack/admin.sock",
@@ -388,7 +397,7 @@ class ConsoleTests(unittest.TestCase):
         original = self.ctx.runner
         @logged
         def other(argv, **kw):
-            if "conntrack" in argv[0]: return subprocess.CompletedProcess(argv,0,b"tcp 6 100 src=1.1.1.1 dst=2.2.2.2 sport=3 dport=4 mark=3905\n",b"")
+            if "conntrack" in argv[0]: return subprocess.CompletedProcess(argv,0,b"tcp 6 100 src=1.1.1.1 dst=9.9.9.9 sport=3 dport=4 mark=3905\n",b"")
             return original(argv, **kw)
         self.ctx.runner = other
         with self.assertRaises(Failure): checks.underlay(self.ctx)
@@ -918,9 +927,20 @@ class ConsoleTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, json.dumps(body).encode(), b"")
         parent = Context(self.paths, runner, require_root=False)
         atomic(self.paths.state / "metrics.jsonl", '{"ts":"x"}\n')
-        with tempfile.TemporaryDirectory() as d, broker.Broker(parent, "research", uid=os.getuid(),
-                                                                directory=Path(d)) as served:
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as stack:
+            # The actual temporary path can exceed Linux's Unix-socket path limit.
+            # Keep the directory private and use a short, process-local fd alias.
+            fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            stack.callback(os.close, fd)
+            directory = Path(f"/proc/self/fd/{fd}/broker")
+            served = stack.enter_context(broker.Broker(parent, "research", uid=os.getuid(), directory=directory))
+            self.assertEqual(directory.stat().st_uid, os.geteuid())
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o711)
+            self.assertEqual(served.path.stat().st_uid, os.getuid())
+            self.assertEqual(served.path.stat().st_mode & 0o777, 0o600)
             worker = broker.WorkerContext(served.path, paths=self.paths)
+            stack.callback(worker.conn.close)
+            stack.callback(worker.reader.close)
             self.assertEqual(worker.api("getSelf")["method"], "getSelf")
             r = worker.run([str(self.paths.ctl), "-json", f"-endpoint=unix://{self.paths.node_sock}",
                             "debug_remotegetpeers", "key=" + PIN])
@@ -944,8 +964,11 @@ class ConsoleTests(unittest.TestCase):
     def test_broker_rejects_foreign_uid_and_metrics_for_other_roles(self):
         import broker
         parent = Context(self.paths, self.ctx.runner, require_root=False)
-        with tempfile.TemporaryDirectory() as d:
-            with broker.Broker(parent, "remote", uid=os.getuid(), directory=Path(d)) as served:
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as stack:
+            fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            stack.callback(os.close, fd)
+            directory = Path(f"/proc/self/fd/{fd}/broker")
+            with broker.Broker(parent, "remote", uid=os.getuid(), directory=directory) as served:
                 served.uid = os.getuid() + 1  # the broker now expects another worker uid
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.settimeout(10)  # generous under load; a rejection is immediate
@@ -957,8 +980,11 @@ class ConsoleTests(unittest.TestCase):
                     reply = b""
                 self.assertEqual(reply, b"")
                 client.close()
-            with broker.Broker(parent, "remote", uid=os.getuid(), directory=Path(d)) as served:
+            with broker.Broker(parent, "remote", uid=os.getuid(), directory=directory) as served, \
+                    contextlib.ExitStack() as worker_stack:
                 worker = broker.WorkerContext(served.path, paths=self.paths)
+                worker_stack.callback(worker.conn.close)
+                worker_stack.callback(worker.reader.close)
                 with self.assertRaisesRegex(Failure, "broker_call_not_allowed"):
                     worker.read_state("metrics.jsonl", 1024)
 
