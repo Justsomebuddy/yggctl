@@ -15,4 +15,7 @@ dependencies, CI permissions and runtime integration deserve explicit review.
 Do not claim an independent clean-room implementation or compatibility beyond
 the evidence available. Check third-party rights before adding external code.
 
-Follow [SECURITY.md](SECURITY.md) for sensitive reports, not a public issue.
+Report bugs and proposals through
+[GitHub Issues](https://github.com/Justsomebuddy/yggctl/issues); propose changes
+through pull requests, not direct pushes to the default branch. Follow
+[SECURITY.md](SECURITY.md) for report content and sensitive-data handling.

@@ -1,0 +1,30 @@
+# QA configuration only: this deployment-specific source is not a pip installer.
+[tool.ruff]
+# Keep source grammar conservative; runtime qualification is Python 3.14.
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["yggctl", "tests"]
+warn_unused_configs = true
+check_untyped_defs = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+testpaths = ["yggctl", "tests"]
+python_files = ["tests.py", "test_*.py"]
+pythonpath = ["yggctl"]
+addopts = ["-ra", "--strict-markers"]
+
+[tool.coverage.run]
+branch = true
+source = ["yggctl"]
+omit = ["*/tests.py", "*/test_support.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100

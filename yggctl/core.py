@@ -1,5 +1,8 @@
 """Trusted paths, secret-safe tracing, execution, parsing and atomic I/O."""
+
 from __future__ import annotations
+
+from typing import BinaryIO, TypedDict, cast
 
 import collections
 import contextlib
@@ -16,14 +19,16 @@ import re
 import selectors
 import signal
 import stat
-import subprocess
+
+# Security review: argv-only process primitives; call sites reviewed below
+import subprocess  # nosec B404
 import syslog
 import tempfile
 import threading
 import time
 import urllib.parse
 
-VERSION = "5.7.2"
+VERSION = "5.7.3"
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"
@@ -33,6 +38,7 @@ KEYS = ("private.key", "yggstack-private.key")
 
 class Failure(Exception):
     """A safe fixed-label error suitable for operator output."""
+
     pass
 
 
@@ -44,7 +50,21 @@ TRACE_KEEP = 400
 _ROUTINE = frozenset({"entry", "exit", "external_start", "external_exit"})
 _ROUTINE_STATE = frozenset({"mutation_lock"})
 _trace_lock = threading.Lock()
-_trace = {"live": False, "quiet": False, "held": 0, "lines": collections.deque(maxlen=TRACE_KEEP)}
+
+
+class _TraceState(TypedDict):
+    live: bool
+    quiet: bool
+    held: int
+    lines: collections.deque[str]
+
+
+_trace: _TraceState = {
+    "live": False,
+    "quiet": False,
+    "held": 0,
+    "lines": collections.deque(maxlen=TRACE_KEEP),
+}
 
 
 def event(kind, label, result=""):
@@ -105,60 +125,87 @@ def logged(fn):
         except BaseException as exc:
             event("error", fn.__name__, type(exc).__name__)
             raise
-        event("exit", fn.__name__, f"status={value}" if fn.__name__ == "main" and type(value) is int else "success")
+        event(
+            "exit",
+            fn.__name__,
+            f"status={value}" if fn.__name__ == "main" and type(value) is int else "success",
+        )
         return value
+
     return traced
 
 
 @logged
-def bounded_process(argv, *, input=None, stdout=None, stderr=None, timeout=20, env=None, pass_fds=(), check=False):
+def bounded_process(
+    argv, *, input=None, stdout=None, stderr=None, timeout=20, env=None, pass_fds=(), check=False
+):
     """Multiplex bounded pipes; no plaintext spooling and no unbounded communicate()."""
-    proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                            pass_fds=pass_fds, start_new_session=True, bufsize=0)
+    # Security review: caller supplies reviewed argv; shell execution is not enabled
+    proc = subprocess.Popen(  # nosec B603
+        argv,
+        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        pass_fds=pass_fds,
+        start_new_session=True,
+        bufsize=0,
+    )
     selector = selectors.DefaultSelector()
     data = {"out": bytearray(), "err": bytearray()}
-    pending = memoryview(input) if input is not None else None
+    # PIPE streams exist by Popen construction; stdin exists only with input.
+    outgoing = cast(BinaryIO, proc.stdout)
+    errors = cast(BinaryIO, proc.stderr)
+    incoming = cast(BinaryIO, proc.stdin)
+    pending = memoryview(input or b"")
     deadline = time.monotonic() + timeout
     try:
-        for stream, name in ((proc.stdout, "out"), (proc.stderr, "err")):
+        for stream, name in ((outgoing, "out"), (errors, "err")):
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, name)
-        if pending is not None:
-            os.set_blocking(proc.stdin.fileno(), False)
-            if pending: selector.register(proc.stdin, selectors.EVENT_WRITE, "in")
-            else: proc.stdin.close()
+        if input is not None:
+            os.set_blocking(incoming.fileno(), False)
+            if pending:
+                selector.register(incoming, selectors.EVENT_WRITE, "in")
+            else:
+                incoming.close()
         while selector.get_map():
             left = deadline - time.monotonic()
-            if left <= 0: raise subprocess.TimeoutExpired(Path(argv[0]).name, timeout)
+            if left <= 0:
+                raise subprocess.TimeoutExpired(Path(argv[0]).name, timeout)
             for item, _ in selector.select(min(left, 0.5)):
                 if item.data == "in":
                     try:
                         count = os.write(item.fd, pending[:65536])
                         pending = pending[count:]
-                    except BrokenPipeError: pending = b""
+                    except BrokenPipeError:
+                        pending = memoryview(b"")
                     if not pending:
                         selector.unregister(item.fileobj)
-                        item.fileobj.close()
+                        incoming.close()
                 else:
                     chunk = os.read(item.fd, 65536)
                     if not chunk:
                         selector.unregister(item.fileobj)
                         continue
                     data[item.data].extend(chunk)
-                    cap = 16*1024*1024 if item.data == "out" else 1024*1024
-                    if len(data[item.data]) > cap: raise Failure("external_output_limit")
-        rc = proc.wait(timeout=max(0.001, deadline-time.monotonic()))
+                    cap = 16 * 1024 * 1024 if item.data == "out" else 1024 * 1024
+                    if len(data[item.data]) > cap:
+                        raise Failure("external_output_limit")
+        rc = proc.wait(timeout=max(0.001, deadline - time.monotonic()))
         return subprocess.CompletedProcess(argv, rc, bytes(data["out"]), bytes(data["err"]))
     except BaseException:
         event("external_error", "bounded_process", "terminated_own_process_group")
-        try: os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         raise
     finally:
         selector.close()
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream is not None: stream.close()
+        for cleanup_stream in (proc.stdin, proc.stdout, proc.stderr):
+            if cleanup_stream is not None:
+                cleanup_stream.close()
         proc.wait()
 
 
@@ -167,12 +214,21 @@ def attached_process(argv, *, stop):
     """Run a long child on this terminal's stdio. If this process is interrupted, stop
     the child's unit first, then wait for the child to exit."""
     env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
-    proc = subprocess.Popen(argv, env=env, close_fds=True)
+    # Security review: caller supplies reviewed argv; shell execution is not enabled
+    proc = subprocess.Popen(argv, env=env, close_fds=True)  # nosec B603
     try:
         return proc.wait()
     except BaseException:
         try:
-            subprocess.run(stop, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False)
+            # Security review: caller supplies reviewed argv; shell execution is not enabled
+            subprocess.run(  # nosec B603
+                stop,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
         finally:
             try:
                 proc.wait(timeout=30)
@@ -198,7 +254,7 @@ class Paths:
 
 class Context:
     # Checks a root parent already ran for a sandboxed worker (see broker.WorkerContext).
-    parent_verified = frozenset()
+    parent_verified: frozenset[str] = frozenset()
 
     @logged
     def __init__(self, paths=None, runner=None, require_root=True, attached=None):
@@ -218,12 +274,22 @@ class Context:
     def run(self, argv, *, timeout=20, check=True, input=None, pass_fds=()):
         executable = Path(argv[0]).name
         event("external_start", executable)
-        env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin", "LANG": "C.UTF-8",
-               "HOME": "/root" if os.geteuid() == 0 else str(Path.home())}
+        env = {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin",
+            "LANG": "C.UTF-8",
+            "HOME": "/root" if os.geteuid() == 0 else str(Path.home()),
+        }
         try:
-            r = self.runner(list(map(str, argv)), input=input, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=timeout, env=env,
-                            pass_fds=pass_fds, check=False)
+            r = self.runner(
+                list(map(str, argv)),
+                input=input,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env=env,
+                pass_fds=pass_fds,
+                check=False,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             event("external_error", executable, type(exc).__name__)
             raise Failure(f"external_unavailable:{executable}") from None
@@ -268,8 +334,14 @@ class Context:
 
     @logged
     def unit(self, unit):
-        r = self.run(["/usr/bin/systemctl", "show", unit,
-                      "--property=ActiveState,SubState,MainPID,NRestarts,UnitFileState,ExecMainStatus"])
+        r = self.run(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                unit,
+                "--property=ActiveState,SubState,MainPID,NRestarts,UnitFileState,ExecMainStatus",
+            ]
+        )
         return dict(line.split("=", 1) for line in r.stdout.decode().splitlines() if "=" in line)
 
     @logged
@@ -390,7 +462,10 @@ def atomic(path, data, mode=0o600):
 def public_config(data):
     secret = {"privatekey", "grouppassword", "password", "token", "secret"}
     if isinstance(data, dict):
-        return {k: "[REDACTED]" if k.lower() in secret and v else public_config(v) for k, v in data.items()}
+        return {
+            k: "[REDACTED]" if k.lower() in secret and v else public_config(v)
+            for k, v in data.items()
+        }
     if isinstance(data, list):
         return [public_config(v) for v in data]
     if isinstance(data, str) and "://" in data:
@@ -408,7 +483,13 @@ def peer_uri(uri, force=False):
         host = u.hostname
     except ValueError:
         raise Failure("invalid_peer_uri") from None
-    if u.scheme not in ("tls", "tcp", "quic", "ws", "wss") or not host or not port or u.fragment or u.username:
+    if (
+        u.scheme not in ("tls", "tcp", "quic", "ws", "wss")
+        or not host
+        or not port
+        or u.fragment
+        or u.username
+    ):
         raise Failure("invalid_peer_uri")
     try:
         addr = ipaddress.ip_address(host)
@@ -423,7 +504,9 @@ def peer_uri(uri, force=False):
         q = urllib.parse.parse_qs(u.query, keep_blank_values=True, strict_parsing=True)
     except ValueError:
         raise Failure("invalid_peer_query") from None
-    if any(len(v) != 1 for v in q.values()) or not re.fullmatch(r"[0-9a-fA-F]{64}", q.get("key", [""])[0]):
+    if any(len(v) != 1 for v in q.values()) or not re.fullmatch(
+        r"[0-9a-fA-F]{64}", q.get("key", [""])[0]
+    ):
         raise Failure("one_valid_key_pin_required")
     if u.scheme not in ("ws", "wss") and u.path not in ("", "/"):
         raise Failure("unexpected_peer_path")
@@ -435,15 +518,27 @@ def peer_uri(uri, force=False):
         origin = q["origin"][0]
         try:
             o = urllib.parse.urlsplit(origin)
-            origin_port = o.port
-        except ValueError: raise Failure("invalid_origin") from None
-        if (u.scheme not in ("ws", "wss") or len(origin) > 255 or re.search(r"[\s\x00-\x1f]", origin)
-                or o.scheme not in ("http", "https") or not o.hostname or o.username is not None
-                or o.password is not None or o.query or o.fragment or o.path not in ("", "/")):
+            _ = o.port  # Access validates malformed and out-of-range origin ports.
+        except ValueError:
+            raise Failure("invalid_origin") from None
+        if (
+            u.scheme not in ("ws", "wss")
+            or len(origin) > 255
+            or re.search(r"[\s\x00-\x1f]", origin)
+            or o.scheme not in ("http", "https")
+            or not o.hostname
+            or o.username is not None
+            or o.password is not None
+            or o.query
+            or o.fragment
+            or o.path not in ("", "/")
+        ):
             raise Failure("invalid_or_credential_bearing_origin")
     if "maxbackoff" in q and not re.fullmatch(r"[0-9]{1,5}(ms|s|m|h)", q["maxbackoff"][0]):
         raise Failure("invalid_maxbackoff")
-    if "priority" in q and (not q["priority"][0].isdigit() or not 0 <= int(q["priority"][0]) <= 255):
+    if "priority" in q and (
+        not q["priority"][0].isdigit() or not 0 <= int(q["priority"][0]) <= 255
+    ):
         raise Failure("invalid_priority")
     q["key"] = [q["key"][0].lower()]
     q.setdefault("maxbackoff", ["30s"])
@@ -461,22 +556,34 @@ def endpoint(uri):
 @logged
 def safe_config(config):
     errors = []
-    if config.get("IfName") != "none": errors.append("TUN_not_none")
-    if config.get("Listen") != []: errors.append("listeners_not_empty")
-    if config.get("MulticastInterfaces") != []: errors.append("multicast_not_empty")
-    if config.get("InterfacePeers") not in ({}, None): errors.append("interface_peers_nonempty")
-    if config.get("PrivateKey"): errors.append("inline_private_key")
-    if config.get("GroupPassword"): errors.append("inline_group_password")
-    if config.get("NodeInfoPrivacy") is not True: errors.append("nodeinfo_privacy")
-    if config.get("NodeInfo") not in ({}, None): errors.append("custom_nodeinfo")
+    if config.get("IfName") != "none":
+        errors.append("TUN_not_none")
+    if config.get("Listen") != []:
+        errors.append("listeners_not_empty")
+    if config.get("MulticastInterfaces") != []:
+        errors.append("multicast_not_empty")
+    if config.get("InterfacePeers") not in ({}, None):
+        errors.append("interface_peers_nonempty")
+    if config.get("PrivateKey"):
+        errors.append("inline_private_key")
+    if config.get("GroupPassword"):
+        errors.append("inline_group_password")
+    if config.get("NodeInfoPrivacy") is not True:
+        errors.append("nodeinfo_privacy")
+    if config.get("NodeInfo") not in ({}, None):
+        errors.append("custom_nodeinfo")
     admin = config.get("AdminListen", "")
-    if not isinstance(admin, str) or not admin.startswith("unix:///run/"): errors.append("unsafe_admin_endpoint")
+    if not isinstance(admin, str) or not admin.startswith("unix:///run/"):
+        errors.append("unsafe_admin_endpoint")
     peers = config.get("Peers")
-    if not isinstance(peers, list) or not peers: errors.append("missing_peers")
+    if not isinstance(peers, list) or not peers:
+        errors.append("missing_peers")
     else:
         for uri in peers:
-            try: peer_uri(uri, force=True)
-            except (Failure, ValueError): errors.append("invalid_peer")
+            try:
+                peer_uri(uri, force=True)
+            except (Failure, ValueError):
+                errors.append("invalid_peer")
     return errors
 
 
@@ -492,6 +599,10 @@ def timestamp():
 
 @logged
 def bounded_number(value, lower, upper):
-    if not str(value).isdigit() or not lower <= int(value) <= upper:
-        raise Failure("numeric_argument_out_of_range")
-    return int(value)
+    try:
+        if not str(value).isdigit() or not lower <= int(value) <= upper:
+            raise Failure("numeric_argument_out_of_range")
+        return int(value)
+    except ValueError as exc:
+        # isdigit() also accepts non-decimal glyphs; int() limits input length.
+        raise Failure("numeric_argument_out_of_range") from exc

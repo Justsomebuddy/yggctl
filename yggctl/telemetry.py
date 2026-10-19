@@ -1,4 +1,7 @@
 """Bounded, serialized samples and truthful missing-data reporting."""
+
+from typing import Any
+
 import datetime as dt
 import hashlib
 import json
@@ -15,14 +18,17 @@ from checks import peers
 @logged
 def rows(ctx, name="metrics.jsonl"):
     data = ctx.read_state(name, 32 * 1024 * 1024)
-    if data is None: return []
+    if data is None:
+        return []
     # An append in progress (or one torn by a crash) leaves an incomplete last line; skip it.
-    if not data.endswith(b"\n"): data = data[:data.rfind(b"\n") + 1]
+    if not data.endswith(b"\n"):
+        data = data[: data.rfind(b"\n") + 1]
     values = []
     for line in data.splitlines():
         try:
             item = json.loads(line)
-            if not isinstance(item, dict): raise ValueError()
+            if not isinstance(item, dict):
+                raise ValueError()
             values.append(item)
         except ValueError:
             raise Failure("corrupt_metric_record") from None
@@ -54,7 +60,9 @@ def append(ctx, name, row, keep=10000):
     path = ctx.p.state / name
     line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
     with ctx.locked():
-        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o640)
+        fd = os.open(
+            path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o640
+        )
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
@@ -81,7 +89,11 @@ def append(ctx, name, row, keep=10000):
         os.chown(path, -1, ctx.p.state.stat().st_gid)
         if count > keep * 6 // 5:
             values = rows(ctx, name)
-            atomic(path, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]), 0o640)
+            atomic(
+                path,
+                "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]),
+                0o640,
+            )
             os.chown(path, -1, ctx.p.state.stat().st_gid)
             event("state", "metric_append", "compacted_by_record_count")
 
@@ -90,7 +102,8 @@ def append(ctx, name, row, keep=10000):
 def notify_state(ctx):
     p = ctx.p.state / "notify.state"
     state = read_regular(p, 16).decode().strip() if p.exists() else "off"
-    if state not in ("on", "off"): raise Failure("invalid_notify_state")
+    if state not in ("on", "off"):
+        raise Failure("invalid_notify_state")
     return state
 
 
@@ -102,15 +115,22 @@ def notify(ctx, action):
             atomic(ctx.p.state / "notify.state", action + "\n", 0o644)
             event("state", "notify", action)
         elif action == "test":
-            append(ctx, "alerts.jsonl", {"ts": timestamp(), "id": secrets.token_hex(8),
-                                         "kind": "labelled-local-selftest"}, 1000)
+            append(
+                ctx,
+                "alerts.jsonl",
+                {"ts": timestamp(), "id": secrets.token_hex(8), "kind": "labelled-local-selftest"},
+                1000,
+            )
             event("alert", "notify", "labelled_local_test")
-        elif action != "show": raise Failure("notify_on_off_show_test")
-        print(f"notify={notify_state(ctx)}; alerts.jsonl, then SimpleX via ygg-alert-forward (no ACK needed)")
+        elif action != "show":
+            raise Failure("notify_on_off_show_test")
+        print(
+            f"notify={notify_state(ctx)}; alerts.jsonl, then SimpleX via ygg-alert-forward (no ACK needed)"
+        )
 
 
 PEER_DOWN_MINUTES = 10
-UNSTABLE_RECONNECTS = 3    # reconnects within the last hour that make a peer "unstable"
+UNSTABLE_RECONNECTS = 3  # reconnects within the last hour that make a peer "unstable"
 UNSTABLE_REPEAT_HOURS = 6  # at most one "unstable" alert per peer in this time
 
 
@@ -134,7 +154,7 @@ def peer_alerts(ctx, sample, uptimes=None):
     up, total = sum(bool(p.get("up")) for p in peers), len(peers)
     changes, tracked = [], {}
     for p in peers:
-        entry = down.get(p["r"]) if isinstance(down.get(p["r"]), dict) else {}
+        entry = candidate if isinstance(candidate := down.get(p["r"]), dict) else {}
         try:
             since = dt.datetime.fromisoformat(entry.get("since", sample["ts"]))
         except (TypeError, ValueError):
@@ -142,17 +162,37 @@ def peer_alerts(ctx, sample, uptimes=None):
         minutes = max(0, int((now - since).total_seconds() // 60))
         if p.get("up"):
             if entry.get("alerted"):
-                changes.append({"kind": "ygg-peer-up", "peer": p["r"], "minutes": minutes, "up": up, "total": total})
+                changes.append(
+                    {
+                        "kind": "ygg-peer-up",
+                        "peer": p["r"],
+                        "minutes": minutes,
+                        "up": up,
+                        "total": total,
+                    }
+                )
             continue
         alerted = bool(entry.get("alerted"))
         if not alerted and minutes >= PEER_DOWN_MINUTES:
-            changes.append({"kind": "ygg-peer-down", "peer": p["r"], "minutes": minutes, "up": up, "total": total})
+            changes.append(
+                {
+                    "kind": "ygg-peer-down",
+                    "peer": p["r"],
+                    "minutes": minutes,
+                    "up": up,
+                    "total": total,
+                }
+            )
             alerted = True
         tracked[p["r"]] = {"since": since.isoformat(), "alerted": alerted}
-    new_starts, new_unstable = reconnects(starts, unstable, uptimes or {}, now, peers, up, total, changes)
+    new_starts, new_unstable = reconnects(
+        starts, unstable, uptimes or {}, now, peers, up, total, changes
+    )
     new_state = {"down": tracked, "starts": new_starts, "unstable": new_unstable}
     if new_state != {"down": down, "starts": starts, "unstable": unstable}:
-        atomic(ctx.p.state / "alert-state.json", json.dumps(new_state, sort_keys=True) + "\n", 0o600)
+        atomic(
+            ctx.p.state / "alert-state.json", json.dumps(new_state, sort_keys=True) + "\n", 0o600
+        )
     return changes
 
 
@@ -185,7 +225,15 @@ def reconnects(starts, unstable, uptimes, now, peers, up, total, changes):
         if last and now - last < dt.timedelta(hours=UNSTABLE_REPEAT_HOURS):
             new_unstable[uri] = last.isoformat()
         elif len(seen) >= UNSTABLE_RECONNECTS:
-            changes.append({"kind": "ygg-peer-unstable", "peer": uri, "count": len(seen), "up": up, "total": total})
+            changes.append(
+                {
+                    "kind": "ygg-peer-unstable",
+                    "peer": uri,
+                    "count": len(seen),
+                    "up": up,
+                    "total": total,
+                }
+            )
             new_unstable[uri] = now.isoformat()
     return new_starts, new_unstable
 
@@ -193,18 +241,33 @@ def reconnects(starts, unstable, uptimes, now, peers, up, total, changes):
 SENDER = "/usr/local/bin/simplex-alert.sh"
 # The sender suppresses repeats within 300 s by priority and rule, so a peer alert names its peer in the rule.
 MESSAGES = {
-    "ygg-peer-down": ("Yggdrasil: пир {peer} недоступен", "Warning",
-                      "Нода yggdrasil-lab: пир {peer} недоступен {minutes} мин; на связи {up} из {total}. "
-                      "Проверка: sudo yggctl peers"),
-    "ygg-peer-unstable": ("Yggdrasil: пир {peer} нестабилен", "Warning",
-                          "Нода yggdrasil-lab: пир {peer} нестабилен — {count} разрывов за последний час; "
-                          "на связи {up} из {total}. Проверка: sudo yggctl peers"),
-    "ygg-peer-up": ("Yggdrasil: пир {peer} снова на связи", "Warning",
-                    "Нода yggdrasil-lab: пир {peer} снова на связи после {minutes} мин; на связи {up} из {total}."),
-    "ygg-health": ("Yggdrasil: сбой ноды", "Error",
-                   "Нода yggdrasil-lab: {errors}. Проверка: sudo yggctl check"),
-    "labelled-local-selftest": ("Yggdrasil: проверка доставки тревог", "Warning",
-                                "Тестовая тревога yggctl (notify test); действий не требуется."),
+    "ygg-peer-down": (
+        "Yggdrasil: пир {peer} недоступен",
+        "Warning",
+        "Нода yggdrasil-lab: пир {peer} недоступен {minutes} мин; на связи {up} из {total}. "
+        "Проверка: sudo yggctl peers",
+    ),
+    "ygg-peer-unstable": (
+        "Yggdrasil: пир {peer} нестабилен",
+        "Warning",
+        "Нода yggdrasil-lab: пир {peer} нестабилен — {count} разрывов за последний час; "
+        "на связи {up} из {total}. Проверка: sudo yggctl peers",
+    ),
+    "ygg-peer-up": (
+        "Yggdrasil: пир {peer} снова на связи",
+        "Warning",
+        "Нода yggdrasil-lab: пир {peer} снова на связи после {minutes} мин; на связи {up} из {total}.",
+    ),
+    "ygg-health": (
+        "Yggdrasil: сбой ноды",
+        "Error",
+        "Нода yggdrasil-lab: {errors}. Проверка: sudo yggctl check",
+    ),
+    "labelled-local-selftest": (
+        "Yggdrasil: проверка доставки тревог",
+        "Warning",
+        "Тестовая тревога yggctl (notify test); действий не требуется.",
+    ),
 }
 
 
@@ -221,7 +284,11 @@ def alert_id(alert):
 def alert_message(alert):
     default = ("Yggdrasil: тревога", "Warning", "Нода yggdrasil-lab: {kind}")
     rule, priority, text = MESSAGES.get(alert.get("kind"), default)
-    fields = {k: str(v)[:120] for k, v in alert.items() if k in ("peer", "minutes", "up", "total", "kind", "count")}
+    fields = {
+        k: str(v)[:120]
+        for k, v in alert.items()
+        if k in ("peer", "minutes", "up", "total", "kind", "count")
+    }
     fields["errors"] = ", ".join(str(e)[:60] for e in alert.get("errors", [])[:5]) or "неизвестно"
     try:
         rule = rule.format(**fields)
@@ -231,8 +298,13 @@ def alert_message(alert):
         output = text.format(**fields)
     except KeyError:
         output = "Нода yggdrasil-lab: тревога " + str(alert.get("kind"))[:60]
-    return {"rule": rule, "priority": priority, "output": output[:300], "source": "yggctl",
-            "time": str(alert.get("ts", ""))[:40]}
+    return {
+        "rule": rule,
+        "priority": priority,
+        "output": output[:300],
+        "source": "yggctl",
+        "time": str(alert.get("ts", ""))[:40],
+    }
 
 
 FORWARD_BUDGET = 90  # includes acquisition of the shared 20 s lock; unit timeout is 120 s
@@ -254,16 +326,24 @@ def forward(ctx):
         ids = [alert_id(a) for a in alerts]
         raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
         if raw is None:
-            atomic(ctx.p.state / "alerts-forwarded.json",
-                   json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n", 0o600)
-            print(f"[1/1] forwarding initialised; processed={len(ids)} earlier alerts not sent; errors=0 "
-                  f"remaining=0 elapsed={time.monotonic()-start:.2f}s")
+            atomic(
+                ctx.p.state / "alerts-forwarded.json",
+                json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n",
+                0o600,
+            )
+            print(
+                f"[1/1] forwarding initialised; processed={len(ids)} earlier alerts not sent; errors=0 "
+                f"remaining=0 elapsed={time.monotonic() - start:.2f}s"
+            )
             return
         try:
             sent = json.loads(raw)["sent"]
-            if (not isinstance(sent, list) or len(sent) > 2000
-                    or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
-                    or len(set(sent)) != len(sent)):
+            if (
+                not isinstance(sent, list)
+                or len(sent) > 2000
+                or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
+                or len(set(sent)) != len(sent)
+            ):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             raise Failure("alerts_forwarded_state_invalid") from None
@@ -278,8 +358,12 @@ def forward(ctx):
                 break
             processed += 1
             try:
-                result = ctx.run([SENDER], input=json.dumps(alert_message(alert), ensure_ascii=False).encode(),
-                                 timeout=min(30, remaining), check=False)
+                result = ctx.run(
+                    [SENDER],
+                    input=json.dumps(alert_message(alert), ensure_ascii=False).encode(),
+                    timeout=min(30, remaining),
+                    check=False,
+                )
                 success = result.returncode == 0
             except Failure:
                 success = False
@@ -287,19 +371,26 @@ def forward(ctx):
                 done.add(aid)
                 # Do not defer this commit until a later message/normal process exit.
                 kept = list(dict.fromkeys(i for i in ids if i in done))[-2000:]
-                atomic(ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": kept}) + "\n", 0o600)
+                atomic(
+                    ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": kept}) + "\n", 0o600
+                )
                 event("state", "alert_forward", "sender_rc0_checkpointed")
             else:
                 failures += 1
                 event("error", "alert_forward", "sender_failed_pending")
             elapsed = time.monotonic() - start
-            print(f"[{processed}/{len(pending)}] sender handoff; processed={processed} errors={failures} "
-                  f"remaining={len(pending)-processed} elapsed={elapsed:.2f}s "
-                  f"ETA<={max(0, deadline-time.monotonic()):.1f}s "
-                  f"speed={processed/max(.001, elapsed):.2f}/s", flush=True)
+            print(
+                f"[{processed}/{len(pending)}] sender handoff; processed={processed} errors={failures} "
+                f"remaining={len(pending) - processed} elapsed={elapsed:.2f}s "
+                f"ETA<={max(0, deadline - time.monotonic()):.1f}s "
+                f"speed={processed / max(0.001, elapsed):.2f}/s",
+                flush=True,
+            )
         left = sum(aid not in done for aid in set(ids))
-        print(f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
-              f"elapsed={time.monotonic()-start:.2f}s; sender rc0 is NOT delivery/human ACK")
+        print(
+            f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
+            f"elapsed={time.monotonic() - start:.2f}s; sender rc0 is NOT delivery/human ACK"
+        )
         if failures:
             raise Failure(f"alert_forward_failed:count={failures}")
         if left:
@@ -312,38 +403,72 @@ def collect(ctx):
     ctx.root()
     with ctx.locked():
         uptimes = {}
-        sample = {"schema": 2, "ts": timestamp(), "mode": None, "act": "unknown", "up": None,
-                  "peers": [], "stack_up": None, "errors": []}
+        sample = {
+            "schema": 2,
+            "ts": timestamp(),
+            "mode": None,
+            "act": "unknown",
+            "up": None,
+            "peers": [],
+            "stack_up": None,
+            "errors": [],
+        }
         try:
             sample["mode"] = ctx.mode()
             for stack, unit in ((False, NODE), (True, STACK)):
                 active = ctx.unit(unit).get("ActiveState", "unknown")
                 ps = peers(ctx, stack)  # Exactly one coherent admin query per instance.
-                if stack: sample["stack_up"] = sum(p["up"] for p in ps)
+                if stack:
+                    sample["stack_up"] = sum(p["up"] for p in ps)
                 else:
                     uptimes = {p.get("remote"): p.get("uptime") for p in ps}
                     sample["act"] = active
                     sample["up"] = sum(p["up"] for p in ps)
-                    sample["peers"] = [{"r": p.get("remote", ""), "up": p["up"],
-                                        "rtt": p.get("latency", 0)/1e6,
-                                        "rx": p.get("bytes_recvd", 0), "tx": p.get("bytes_sent", 0)} for p in ps]
-                if active != "active": sample["errors"].append("stack_inactive" if stack else "node_inactive")
+                    sample["peers"] = [
+                        {
+                            "r": p.get("remote", ""),
+                            "up": p["up"],
+                            "rtt": p.get("latency", 0) / 1e6,
+                            "rx": p.get("bytes_recvd", 0),
+                            "tx": p.get("bytes_sent", 0),
+                        }
+                        for p in ps
+                    ]
+                if active != "active":
+                    sample["errors"].append("stack_inactive" if stack else "node_inactive")
         except (Failure, OSError, ValueError) as exc:
             sample["errors"].append(str(exc) if isinstance(exc, Failure) else "metric_unavailable")
-        if sample["up"] == 0 or sample["stack_up"] == 0: sample["errors"].append("no_up_peers")
+        if sample["up"] == 0 or sample["stack_up"] == 0:
+            sample["errors"].append("no_up_peers")
         append(ctx, "metrics.jsonl", sample)
         changes = peer_alerts(ctx, sample, uptimes)
         if notify_state(ctx) == "on":
             for change in changes:
-                append(ctx, "alerts.jsonl", {"ts": sample["ts"], "id": secrets.token_hex(8), **change}, 1000)
+                append(
+                    ctx,
+                    "alerts.jsonl",
+                    {"ts": sample["ts"], "id": secrets.token_hex(8), **change},
+                    1000,
+                )
                 event("alert", "collect", change["kind"])
             if sample["errors"]:
                 key = "collect:" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H")
                 if not any(a.get("key") == key for a in rows(ctx, "alerts.jsonl")):
-                    append(ctx, "alerts.jsonl", {"ts": sample["ts"], "id": secrets.token_hex(8), "kind": "ygg-health",
-                                               "key": key, "errors": sample["errors"]}, 1000)
+                    append(
+                        ctx,
+                        "alerts.jsonl",
+                        {
+                            "ts": sample["ts"],
+                            "id": secrets.token_hex(8),
+                            "kind": "ygg-health",
+                            "key": key,
+                            "errors": sample["errors"],
+                        },
+                        1000,
+                    )
                     event("alert", "collect", "health_degraded")
-        if sample["errors"]: raise Failure("sample_recorded_with_unknown_or_degraded_health")
+        if sample["errors"]:
+            raise Failure("sample_recorded_with_unknown_or_degraded_health")
         print("[1/1] sample recorded; processed=2 instances errors=0 remaining=0")
         return sample
 
@@ -356,12 +481,14 @@ def window(ctx, hours=24):
     for r in rows(ctx):
         try:
             at = dt.datetime.fromisoformat(r["ts"])
-            if at.tzinfo is None: raise ValueError()
+            if at.tzinfo is None:
+                raise ValueError()
         except (KeyError, ValueError, TypeError):
             invalid += 1
             event("state", "metric_window", "invalid_timestamp_skipped")
             continue
-        if start <= at <= now: found.append((at, r))
+        if start <= at <= now:
+            found.append((at, r))
     if not found:
         raise Failure(f"no_samples_in_window:invalid_records={invalid}")
     return sorted(found, key=lambda x: x[0]), invalid
@@ -371,29 +498,41 @@ def window(ctx, hours=24):
 def stats(ctx, hours=24, graph=False):
     values, invalid = window(ctx, hours)
     unknown = sum(r.get("up") is None or bool(r.get("errors")) for _, r in values)
-    gaps = sum(max(0, round((b[0]-a[0]).total_seconds()/60)-1) for a, b in zip(values, values[1:]))
+    gaps = sum(
+        max(0, round((b[0] - a[0]).total_seconds() / 60) - 1) for a, b in zip(values, values[1:])
+    )
     names = sorted({p["r"] for _, r in values for p in r.get("peers", [])})
-    print(f"window={hours}h samples={len(values)} unknown_records={unknown} "
-          f"invalid_records={invalid} missing_minutes_between_samples={gaps}; "
-          f"observed availability is NOT wall-clock uptime")
+    print(
+        f"window={hours}h samples={len(values)} unknown_records={unknown} "
+        f"invalid_records={invalid} missing_minutes_between_samples={gaps}; "
+        f"observed availability is NOT wall-clock uptime"
+    )
     for name in names:
         matches = [next((p for p in r.get("peers", []) if p["r"] == name), None) for _, r in values]
         known = [p for p in matches if p is not None]
         up = sum(p["up"] for p in known)
         latency = [p["rtt"] for p in known if p["up"] and p.get("rtt", 0) > 0]
         median = statistics.median(latency) if latency else "unknown"
-        print(f"{name}: observed_avail={100*up/len(known):.1f}% present={len(known)} "
-              f"absent={len(matches)-len(known)} median_ms={median}")
+        print(
+            f"{name}: observed_avail={100 * up / len(known):.1f}% present={len(known)} "
+            f"absent={len(matches) - len(known)} median_ms={median}"
+        )
         if graph:
             # Bin the entire requested time window, not simply the last 60 samples.
             end = dt.datetime.now(dt.timezone.utc)
             begin = end - dt.timedelta(hours=hours)
-            bins = [[] for _ in range(60)]
-            span = max(1, (end-begin).total_seconds())
+            bins: list[list[dict[str, Any] | None]] = [[] for _ in range(60)]
+            span = max(1, (end - begin).total_seconds())
             for (at, _), p in zip(values, matches):
-                bins[min(59, int((at-begin).total_seconds()*60/span))].append(p)
-            marks = ("?" if not b or all(p is None for p in b) else "." if not any(p and p["up"] for p in b) else "#"
-                     for b in bins)
+                bins[min(59, int((at - begin).total_seconds() * 60 / span))].append(p)
+            marks = (
+                "?"
+                if not b or all(p is None for p in b)
+                else "."
+                if not any(p and p["up"] for p in b)
+                else "#"
+                for b in bins
+            )
             print("".join(marks))
             print("60 time bins: # observed up, . observed down, ? unknown; NOT RTT bars")
 
@@ -403,17 +542,20 @@ def watch(ctx, count=5, interval=2):
     start, errors = time.monotonic(), 0
     for i in range(count):
         try:
-            node = sum(p['up'] for p in peers(ctx))
-            stack = sum(p['up'] for p in peers(ctx, True))
+            node = sum(p["up"] for p in peers(ctx))
+            stack = sum(p["up"] for p in peers(ctx, True))
         except (Failure, OSError, ValueError, KeyError):
             node = stack = "unknown"
             errors += 1
             event("error", "watch_sample", "unavailable_unknown")
-        print(f"[{i+1}/{count}] node_up={node} stack_up={stack} errors={errors} "
-              f"elapsed={time.monotonic()-start:.1f}s ETA={(count-i-1)*interval}s "
-              f"speed=1/{interval}s remaining={count-i-1}", flush=True)
-        if i+1 < count:
+        print(
+            f"[{i + 1}/{count}] node_up={node} stack_up={stack} errors={errors} "
+            f"elapsed={time.monotonic() - start:.1f}s ETA={(count - i - 1) * interval}s "
+            f"speed=1/{interval}s remaining={count - i - 1}",
+            flush=True,
+        )
+        if i + 1 < count:
             time.sleep(interval)
-    print(f"processed={count} errors={errors} elapsed={time.monotonic()-start:.1f}s")
+    print(f"processed={count} errors={errors} elapsed={time.monotonic() - start:.1f}s")
     if errors:
         raise Failure(f"watch_samples_failed:count={errors}")

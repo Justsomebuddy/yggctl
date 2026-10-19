@@ -1,4 +1,5 @@
 """Fail-closed structured health checks, including PID-bound underlay proof."""
+
 from pathlib import Path
 import ipaddress
 import json
@@ -6,30 +7,50 @@ import re
 import stat
 import time
 
-from core import (Failure, NODE, STACK, TIMER, KEYS, read_regular, logged, event,
-                  digest, safe_config, endpoint)
+from core import (
+    Failure,
+    NODE,
+    STACK,
+    TIMER,
+    KEYS,
+    read_regular,
+    logged,
+    event,
+    digest,
+    safe_config,
+    endpoint,
+)
 
 
 @logged
 def peers(ctx, stack=False):
     rows = ctx.api("getPeers", stack=stack).get("peers")
-    if not isinstance(rows, list) or any(not isinstance(p, dict) or type(p.get("up")) is not bool for p in rows):
+    if not isinstance(rows, list) or any(
+        not isinstance(p, dict) or type(p.get("up")) is not bool for p in rows
+    ):
         raise Failure("invalid_peer_schema")
     for p in rows:
-        if not isinstance(p.get("remote"), str): raise Failure("invalid_peer_remote")
+        if not isinstance(p.get("remote"), str):
+            raise Failure("invalid_peer_remote")
         for field in ("latency", "bytes_recvd", "bytes_sent"):
             value = p.get(field, 0)
-            if type(value) not in (int, float) or value < 0: raise Failure("invalid_peer_counter")
+            if type(value) not in (int, float) or value < 0:
+                raise Failure("invalid_peer_counter")
     return rows
 
 
 @logged
 def policy(ctx):
     return {
-        "FW_RUNTIME_SHA": digest(ctx.run(["/usr/bin/firewall-cmd", "--zone=public", "--list-all"]).stdout),
-        "FW_PERMANENT_SHA": digest(ctx.run(["/usr/bin/firewall-cmd", "--permanent", "--zone=public",
-                                            "--list-all"]).stdout),
-        "NFT_MULLVAD_SHA": digest(ctx.run(["/usr/sbin/nft", "list", "table", "inet", "mullvad"]).stdout),
+        "FW_RUNTIME_SHA": digest(
+            ctx.run(["/usr/bin/firewall-cmd", "--zone=public", "--list-all"]).stdout
+        ),
+        "FW_PERMANENT_SHA": digest(
+            ctx.run(["/usr/bin/firewall-cmd", "--permanent", "--zone=public", "--list-all"]).stdout
+        ),
+        "NFT_MULLVAD_SHA": digest(
+            ctx.run(["/usr/sbin/nft", "list", "table", "inet", "mullvad"]).stdout
+        ),
     }
 
 
@@ -39,7 +60,12 @@ def baseline(ctx):
     for line in read_regular(ctx.p.etc / "baseline.env").decode().splitlines():
         if line and not line.startswith("#"):
             k, _, v = line.partition("=")
-            if k in values or k not in {"FW_RUNTIME_SHA", "FW_PERMANENT_SHA", "NFT_MULLVAD_SHA", "BASELINE_AT"}:
+            if k in values or k not in {
+                "FW_RUNTIME_SHA",
+                "FW_PERMANENT_SHA",
+                "NFT_MULLVAD_SHA",
+                "BASELINE_AT",
+            }:
                 raise Failure("invalid_baseline")
             values[k] = v
     for k in policy_keys():
@@ -72,32 +98,73 @@ def integrity(ctx):
     checked = set()
     for line in manifest.splitlines():
         m = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
-        if not m: raise Failure("invalid_integrity_manifest")
+        if not m:
+            raise Failure("invalid_integrity_manifest")
         path = Path(m[2])
-        if not path.is_absolute(): path = ctx.p.etc / path
-        if path in checked: raise Failure("duplicate_integrity_member")
-        if ctx.require_root: trusted(path)
+        if not path.is_absolute():
+            path = ctx.p.etc / path
+        if path in checked:
+            raise Failure("duplicate_integrity_member")
+        if ctx.require_root:
+            trusted(path)
         if digest(read_regular(path, limit=256 * 1024 * 1024)) != m[1]:
             raise Failure("integrity_mismatch")
         checked.add(path)
-    required = {Path(ctx.p.node), Path(ctx.p.stack), ctx.p.units / NODE, ctx.p.units / STACK,
-                ctx.p.etc / "yggdrasil-lab.conf", ctx.p.etc / "yggstack.conf",
-                ctx.p.etc / "gate.nft", ctx.p.etc / "gate-yggstack.nft"}
+    required = {
+        Path(ctx.p.node),
+        Path(ctx.p.stack),
+        ctx.p.units / NODE,
+        ctx.p.units / STACK,
+        ctx.p.etc / "yggdrasil-lab.conf",
+        ctx.p.etc / "yggstack.conf",
+        ctx.p.etc / "gate.nft",
+        ctx.p.etc / "gate-yggstack.nft",
+    }
     if ctx.require_root:
-        required |= {ctx.p.units / TIMER, ctx.p.units / "ygg-metrics.service", Path("/usr/bin/yggctl"),
-                     ctx.p.runtime / "main.py", ctx.p.runtime / "core.py", ctx.p.runtime / "checks.py",
-                     ctx.p.runtime / "management.py", ctx.p.runtime / "telemetry.py", ctx.p.runtime / "recovery.py",
-                     ctx.p.runtime / "tests.py", ctx.p.runtime / "rotate.py", ctx.p.runtime / "sandbox.py",
-                     ctx.p.runtime / "broker.py", ctx.p.units / "ygg-alert-forward.service",
-                     ctx.p.units / "ygg-alert-forward.path", Path("/etc/sysusers.d/ygglab-worker.conf"),
-                     Path("/usr/local/bin/yggctl"), Path(ctx.p.decoder),
-                     ctx.p.etc / "mode", ctx.p.etc / "baseline.env"}
+        required |= {
+            ctx.p.units / TIMER,
+            ctx.p.units / "ygg-metrics.service",
+            Path("/usr/bin/yggctl"),
+            ctx.p.runtime / "main.py",
+            ctx.p.runtime / "core.py",
+            ctx.p.runtime / "checks.py",
+            ctx.p.runtime / "management.py",
+            ctx.p.runtime / "telemetry.py",
+            ctx.p.runtime / "recovery.py",
+            ctx.p.runtime / "tests.py",
+            ctx.p.runtime / "test_support.py",
+            ctx.p.runtime / "rotate.py",
+            ctx.p.runtime / "sandbox.py",
+            ctx.p.runtime / "broker.py",
+            ctx.p.units / "ygg-alert-forward.service",
+            ctx.p.units / "ygg-alert-forward.path",
+            Path("/etc/sysusers.d/ygglab-worker.conf"),
+            Path("/usr/local/bin/yggctl"),
+            Path(ctx.p.decoder),
+            ctx.p.etc / "mode",
+            ctx.p.etc / "baseline.env",
+        }
         required.add(ctx.p.etc / "baseline-runtime-public.txt")
         required.add(ctx.p.etc / "baseline-nft-mullvad.txt")
-        required |= {ctx.p.runtime / "research" / n for n in ("__init__.py", "model.py", "metrics.py", "tests.py")}
-        required |= {ctx.p.runtime / "atlas" / n for n in ("__init__.py", "store.py", "protocol.py", "catalogue.py",
-                                                            "acquisition.py", "analysis.py", "viewer.py", "tests.py")}
-    if not required <= checked: raise Failure("integrity_coverage_incomplete")
+        required |= {
+            ctx.p.runtime / "research" / n
+            for n in ("__init__.py", "model.py", "metrics.py", "tests.py")
+        }
+        required |= {
+            ctx.p.runtime / "atlas" / n
+            for n in (
+                "__init__.py",
+                "store.py",
+                "protocol.py",
+                "catalogue.py",
+                "acquisition.py",
+                "analysis.py",
+                "viewer.py",
+                "tests.py",
+            )
+        }
+    if not required <= checked:
+        raise Failure("integrity_coverage_incomplete")
     return len(checked)
 
 
@@ -105,7 +172,8 @@ def integrity(ctx):
 def underlay(ctx):
     mode = ctx.mode()
     pids = [int(ctx.unit(u).get("MainPID", "0")) for u in (NODE, STACK)]
-    if not all(p > 0 for p in pids): raise Failure("missing_runtime_pid")
+    if not all(p > 0 for p in pids):
+        raise Failure("missing_runtime_pid")
     split_list = ctx.run(["/usr/bin/mullvad", "split-tunnel", "list"]).stdout.decode()
     exclusions = set(re.findall(r"(?m)^\s*(\d+)\s*$", split_list))
     if any((str(p) in exclusions) != (mode == "direct") for p in pids):
@@ -116,19 +184,23 @@ def underlay(ctx):
     proof = dict.fromkeys(pids, 0)
     for line in sockets:
         fields = line.split()
-        if len(fields) < 6: continue
+        if len(fields) < 6:
+            continue
         for pid in pids:
-            if not re.search(rf"\bpid={pid},", line): continue
+            if not re.search(rf"\bpid={pid},", line):
+                continue
             local, remote = fields[4:6]
             try:
                 src, sport = local.rsplit(":", 1)
                 dst, dport = remote.rsplit(":", 1)
-            except ValueError: continue
+            except ValueError:
+                continue
             prefix = f"src={src} dst={dst} sport={sport} dport={dport}"
             matches = [r for r in conn if prefix + " " in r and r.split()[0] == fields[0]]
             if any(bool(re.search(r"\bmark=3905\b", r)) == (mode == "direct") for r in matches):
                 proof[pid] += 1
-    if not all(proof.values()): raise Failure("underlay_own_socket_proof_missing")
+    if not all(proof.values()):
+        raise Failure("underlay_own_socket_proof_missing")
     return {"mode": mode, "own_connections": list(proof.values())}
 
 
@@ -136,9 +208,11 @@ def underlay(ctx):
 def guard(ctx):
     for name in ("yggdrasil-lab.conf", "yggstack.conf"):
         config = ctx.config(name)
-        if safe_config(config): raise Failure("unsafe_config")
+        if safe_config(config):
+            raise Failure("unsafe_config")
         expected = ctx.p.node_sock if name.startswith("yggdrasil") else ctx.p.stack_sock
-        if config.get("AdminListen") != f"unix://{expected}": raise Failure("admin_config_mismatch")
+        if config.get("AdminListen") != f"unix://{expected}":
+            raise Failure("admin_config_mismatch")
     for name in KEYS:
         s = (ctx.p.etc / name).lstat()
         if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode) != 0o600 or s.st_uid != 0:
@@ -164,14 +238,29 @@ def sockets(ctx):
 @logged
 def check(ctx, emit=True):
     ctx.root()
-    gates = [("config/keys/admin", guard), ("integrity/root trust", integrity),
-             ("listeners", sockets), ("underlay own sockets", underlay)]
-    for u in (NODE, STACK): gates.append((u, lambda c, u=u: service_gate(c, u)))
+    gates = [
+        ("config/keys/admin", guard),
+        ("integrity/root trust", integrity),
+        ("listeners", sockets),
+        ("underlay own sockets", underlay),
+    ]
+    for u in (NODE, STACK):
+        gates.append((u, lambda c, u=u: service_gate(c, u)))
     for stack in (False, True):
         gates.append(("stack peers" if stack else "node peers", lambda c, s=stack: peer_gate(c, s)))
-        gates.append(("stack no multicast" if stack else "node no multicast", lambda c, s=stack: multicast_gate(c, s)))
-    gates += [("no TUN", tun_gate), ("firewall baseline", policy_gate),
-              ("no transient gates", nft_gate), ("packaged masked", masked_gate), ("collector timer", timer_gate)]
+        gates.append(
+            (
+                "stack no multicast" if stack else "node no multicast",
+                lambda c, s=stack: multicast_gate(c, s),
+            )
+        )
+    gates += [
+        ("no TUN", tun_gate),
+        ("firewall baseline", policy_gate),
+        ("no transient gates", nft_gate),
+        ("packaged masked", masked_gate),
+        ("collector timer", timer_gate),
+    ]
     failures = []
     start = time.monotonic()
     for i, (label, fn) in enumerate(gates, 1):
@@ -181,18 +270,26 @@ def check(ctx, emit=True):
         except (Failure, OSError, ValueError, KeyError) as exc:
             failures.append(label)
             result = f"FAIL {exc}" if isinstance(exc, Failure) else "FAIL unavailable/invalid"
-        if emit: print(f"[{i}/{len(gates)}] {label}: {result}; remaining={len(gates)-i}", flush=True)
+        if emit:
+            print(f"[{i}/{len(gates)}] {label}: {result}; remaining={len(gates) - i}", flush=True)
     if emit:
-        print(f"CHECK {'FAIL' if failures else 'PASS'} processed={len(gates)} errors={len(failures)} "
-              f"elapsed={time.monotonic()-start:.2f}s")
-    if failures: raise Failure("health_gates_failed")
+        print(
+            f"CHECK {'FAIL' if failures else 'PASS'} processed={len(gates)} errors={len(failures)} "
+            f"elapsed={time.monotonic() - start:.2f}s"
+        )
+    if failures:
+        raise Failure("health_gates_failed")
     return len(gates)
 
 
 @logged
 def service_gate(ctx, unit):
     u = ctx.unit(unit)
-    if u.get("ActiveState") != "active" or u.get("SubState") != "running" or int(u.get("NRestarts", "1")):
+    if (
+        u.get("ActiveState") != "active"
+        or u.get("SubState") != "running"
+        or int(u.get("NRestarts", "1"))
+    ):
         raise Failure("unit_not_stably_running")
 
 
@@ -201,7 +298,8 @@ def peer_gate(ctx, stack):
     rows = peers(ctx, stack)
     expected = set(ctx.config("yggstack.conf" if stack else "yggdrasil-lab.conf")["Peers"])
     up = {endpoint(p.get("remote", "")) for p in rows if p["up"] and not p.get("inbound")}
-    if len(up & {endpoint(p) for p in expected}) < 2: raise Failure("less_than_two_configured_peers_up")
+    if len(up & {endpoint(p) for p in expected}) < 2:
+        raise Failure("less_than_two_configured_peers_up")
 
 
 @logged
@@ -212,7 +310,8 @@ def multicast_gate(ctx, stack):
 
 @logged
 def tun_gate(ctx):
-    if ctx.api("getTun").get("enabled") is not False: raise Failure("tun_unknown_or_enabled")
+    if ctx.api("getTun").get("enabled") is not False:
+        raise Failure("tun_unknown_or_enabled")
 
 
 @logged
@@ -223,15 +322,24 @@ def runtime_display(data):
     parser: unsupported formatting, duplicates or control bytes fail closed.
     """
     marker = b"  rich rules: \n"
-    if (not isinstance(data, bytes) or len(data) > 65536 or not data.endswith(b"\n")
-            or data.count(marker) != 1 or any(c < 32 and c not in (9, 10) for c in data)
-            or b"\x7f" in data):
+    if (
+        not isinstance(data, bytes)
+        or len(data) > 65536
+        or not data.endswith(b"\n")
+        or data.count(marker) != 1
+        or any(c < 32 and c not in (9, 10) for c in data)
+        or b"\x7f" in data
+    ):
         raise Failure("invalid_runtime_display")
     prefix, tail = data.split(marker)
     rules = tail.splitlines(keepends=True)
-    if (len(rules) > 256 or len(rules) != len(set(rules))
-            or any(not r.startswith(b"\trule ") or not r.endswith(b"\n")
-                   or b"\t" in r[1:] for r in rules)):
+    if (
+        len(rules) > 256
+        or len(rules) != len(set(rules))
+        or any(
+            not r.startswith(b"\trule ") or not r.endswith(b"\n") or b"\t" in r[1:] for r in rules
+        )
+    ):
         raise Failure("invalid_runtime_rich_rules")
     return prefix + marker + b"".join(sorted(rules))
 
@@ -248,14 +356,20 @@ def quic_relay(data):
         single = obfuscation["Single"]
         relay = single["endpoint"]
         address = relay["address"]
-        if (status["state"] != "connected" or tunnel["protocol"] != "udp"
-                or tunnel["tunnel_interface"] != "wg0-mullvad"
-                or set(obfuscation) != {"Single"}
-                or single["obfuscation_type"] != "Quic" or relay["protocol"] != "udp"
-                or not isinstance(address, str) or not address.endswith(":443")):
+        if (
+            status["state"] != "connected"
+            or tunnel["protocol"] != "udp"
+            or tunnel["tunnel_interface"] != "wg0-mullvad"
+            or set(obfuscation) != {"Single"}
+            or single["obfuscation_type"] != "Quic"
+            or relay["protocol"] != "udp"
+            or not isinstance(address, str)
+            or not address.endswith(":443")
+        ):
             raise ValueError
         ip = ipaddress.IPv4Address(address[:-4])
-        if not ip.is_global or address != f"{ip}:443": raise ValueError
+        if not ip.is_global or address != f"{ip}:443":
+            raise ValueError
     except (ValueError, KeyError, TypeError, AttributeError):
         raise Failure("unsupported_mullvad_relay_status") from None
     return str(ip).encode("ascii")
@@ -269,35 +383,49 @@ def relay_display(reference, current, relay, tunnel=None):
     remain significant. The caller must first anchor reference to the old SHA.
     """
     for data in (reference, current):
-        if (not isinstance(data, bytes) or len(data) > 65536 or not data.endswith(b"\n")
-                or any(c < 32 and c not in (9, 10) for c in data) or b"\x7f" in data):
+        if (
+            not isinstance(data, bytes)
+            or len(data) > 65536
+            or not data.endswith(b"\n")
+            or any(c < 32 and c not in (9, 10) for c in data)
+            or b"\x7f" in data
+        ):
             raise Failure("invalid_mullvad_display")
-    slots = ((b"ip saddr ", b" udp sport 443 meta mark set 0x6d6f6c65"),
-             (b"ip daddr ", b" udp dport 443 meta mark 0x6d6f6c65 accept"),
-             (b"ip saddr ", b" udp sport 443 ct state established accept"))
+    slots = (
+        (b"ip saddr ", b" udp sport 443 meta mark set 0x6d6f6c65"),
+        (b"ip daddr ", b" udp dport 443 meta mark 0x6d6f6c65 accept"),
+        (b"ip saddr ", b" udp sport 443 ct state established accept"),
+    )
     addresses = []
     for prefix, suffix in slots:
         pattern = b"^\\t\\t" + re.escape(prefix) + rb"([0-9.]+)" + re.escape(suffix) + b"\\n"
         matches = re.findall(pattern, reference, re.MULTILINE)
-        if len(matches) != 1: raise Failure("unsupported_mullvad_reference_slots")
+        if len(matches) != 1:
+            raise Failure("unsupported_mullvad_reference_slots")
         addresses.extend(matches)
     old = addresses[0]
     if len(set(addresses)) != 1 or reference.count(old) != 3:
         raise Failure("unsupported_mullvad_reference_slots")
     try:
-        if str(ipaddress.IPv4Address(old.decode("ascii"))).encode("ascii") != old:
-            raise ValueError
-        if str(ipaddress.IPv4Address(relay.decode("ascii"))).encode("ascii") != relay:
-            raise ValueError
+        # IPv4Address(str) already rejects non-canonical dotted decimal (including
+        # leading zeroes). Rechecking str(parsed) introduced unreachable branches;
+        # retain both strict parses and their shared fail-closed error boundary.
+        ipaddress.IPv4Address(old.decode("ascii"))
+        ipaddress.IPv4Address(relay.decode("ascii"))
     except (ValueError, UnicodeError, AttributeError):
         raise Failure("invalid_mullvad_relay_address") from None
     candidate = reference.replace(old, relay)
     if tunnel is not None:
-        if not isinstance(tunnel, tuple) or len(tunnel) != 2 or any(not isinstance(a, str) for a in tunnel):
+        if (
+            not isinstance(tunnel, tuple)
+            or len(tunnel) != 2
+            or any(not isinstance(a, str) for a in tunnel)
+        ):
             raise Failure("unsupported_mullvad_tunnel_address")
         # Anchor slots to the INPUT chain of the accepted reference, not arbitrary drop rules.
         marker = b"\tchain input {\n"
-        if reference.count(marker) != 1: raise Failure("unsupported_mullvad_tunnel_slots")
+        if reference.count(marker) != 1:
+            raise Failure("unsupported_mullvad_tunnel_slots")
         body = reference.split(marker, 1)[1].split(b"\t}\n", 1)[0]
         for family, address in zip((b"ip", b"ip6"), tunnel, strict=True):
             pattern = rb"(?m)^\t\t" + family + rb" daddr ([0-9a-f:.]+) drop\n"
@@ -310,12 +438,19 @@ def relay_display(reference, current, relay, tunnel=None):
                 for value in (previous.decode("ascii"), address):
                     parsed = ipaddress.ip_address(value)
                     network = "10.0.0.0/8" if version == 4 else "fc00::/7"
-                    if parsed.version != version or str(parsed) != value or parsed not in ipaddress.ip_network(network):
+                    if (
+                        parsed.version != version
+                        or str(parsed) != value
+                        or parsed not in ipaddress.ip_network(network)
+                    ):
                         raise ValueError
             except (ValueError, UnicodeError, TypeError):
                 raise Failure("unsupported_mullvad_tunnel_address") from None
-            candidate = candidate.replace(matches[0][0], b"\t\t" + family + b" daddr " +
-                                          address.encode("ascii") + b" drop\n", 1)
+            candidate = candidate.replace(
+                matches[0][0],
+                b"\t\t" + family + b" daddr " + address.encode("ascii") + b" drop\n",
+                1,
+            )
     return candidate == current
 
 
@@ -326,25 +461,40 @@ def tunnel_addresses(data):
         raise Failure("unsupported_mullvad_interface_addresses")
     try:
         rows = json.loads(data)
-        if not isinstance(rows, list) or len(rows) != 1: raise ValueError
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise ValueError
         row = rows[0]
-        if (row["ifname"] != "wg0-mullvad" or not isinstance(row["flags"], list)
-                or "UP" not in row["flags"]): raise ValueError
-        found = {"inet": [], "inet6": []}
+        if (
+            row["ifname"] != "wg0-mullvad"
+            or not isinstance(row["flags"], list)
+            or "UP" not in row["flags"]
+        ):
+            raise ValueError
+        found: dict[str, list[str]] = {"inet": [], "inet6": []}
         for addr in row["addr_info"]:
-            if addr.get("scope") != "global": continue
+            if addr.get("scope") != "global":
+                continue
             family = addr["family"]
-            if (family not in found or any(addr.get(f) for f in ("tentative", "dadfailed", "deprecated"))
-                    or not isinstance(addr.get("flags", []), list)
-                    or any(f in addr.get("flags", []) for f in ("tentative", "dadfailed", "deprecated"))):
+            if (
+                family not in found
+                or any(addr.get(f) for f in ("tentative", "dadfailed", "deprecated"))
+                or not isinstance(addr.get("flags", []), list)
+                or any(f in addr.get("flags", []) for f in ("tentative", "dadfailed", "deprecated"))
+            ):
                 raise ValueError
             ip = ipaddress.ip_address(addr["local"])
             version = 4 if family == "inet" else 6
             network = "10.0.0.0/8" if version == 4 else "fc00::/7"
-            if (ip.version != version or str(ip) != addr["local"] or ip not in ipaddress.ip_network(network)
-                    or addr.get("valid_life_time", 1) == 0): raise ValueError
+            if (
+                ip.version != version
+                or str(ip) != addr["local"]
+                or ip not in ipaddress.ip_network(network)
+                or addr.get("valid_life_time", 1) == 0
+            ):
+                raise ValueError
             found[family].append(str(ip))
-        if any(len(values) != 1 for values in found.values()): raise ValueError
+        if any(len(values) != 1 for values in found.values()):
+            raise ValueError
         return found["inet"][0], found["inet6"][0]
     except (ValueError, KeyError, TypeError, AttributeError):
         raise Failure("unsupported_mullvad_interface_addresses") from None
@@ -353,7 +503,8 @@ def tunnel_addresses(data):
 @logged
 def nft_relay_gate(ctx, expected, observed):
     path = ctx.p.etc / "baseline-nft-mullvad.txt"
-    if ctx.require_root: trusted(path)
+    if ctx.require_root:
+        trusted(path)
     try:
         reference = read_regular(path, limit=65536)
     except OSError:
@@ -368,7 +519,8 @@ def nft_relay_gate(ctx, expected, observed):
         command = ["/usr/sbin/ip", "-j", "addr", "show", "dev", "wg0-mullvad"]
         before = tunnel_addresses(ctx.run(command).stdout)
         current = ctx.run(["/usr/sbin/nft", "list", "table", "inet", "mullvad"]).stdout
-        if digest(current) != observed: raise Failure("mullvad_display_changed_during_check")
+        if digest(current) != observed:
+            raise Failure("mullvad_display_changed_during_check")
         if not relay_display(reference, current, relay, before):
             raise Failure("policy_baseline_drift_do_not_auto_accept")
         if tunnel_addresses(ctx.run(command).stdout) != before:
@@ -391,7 +543,8 @@ def policy_gate(ctx):
         return
     # Legacy SHA is authoritative; never enroll a current observation as accepted.
     path = ctx.p.etc / "baseline-runtime-public.txt"
-    if ctx.require_root: trusted(path)
+    if ctx.require_root:
+        trusted(path)
     reference = read_regular(path, limit=65536)
     if digest(reference) != expected["FW_RUNTIME_SHA"]:
         raise Failure("runtime_reference_not_accepted_baseline")
@@ -420,6 +573,8 @@ def masked_gate(ctx):
 
 @logged
 def timer_gate(ctx):
-    if ctx.unit(TIMER).get("ActiveState") != "active": raise Failure("collector_timer_inactive")
+    if ctx.unit(TIMER).get("ActiveState") != "active":
+        raise Failure("collector_timer_inactive")
     u = ctx.unit("ygg-metrics.service")
-    if u.get("ActiveState") == "failed" or u.get("ExecMainStatus") != "0": raise Failure("collector_failed")
+    if u.get("ActiveState") == "failed" or u.get("ExecMainStatus") != "0":
+        raise Failure("collector_failed")

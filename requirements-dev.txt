@@ -1,0 +1,8 @@
+# QA only; runtime remains standard-library-only.
+# Direct tool versions, NOT a complete transitive/hash lock.
+ruff==0.15.6
+mypy==1.19.1
+bandit==1.9.4
+pytest==9.0.2
+coverage==7.13.0
+hypothesis==6.151.9

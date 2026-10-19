@@ -1,0 +1,24 @@
+# Three reviewed local patterns only; not a community or comprehensive SAST ruleset.
+rules:
+  - id: local.dynamic-eval
+    languages: [python]
+    severity: ERROR
+    message: Dynamic evaluation requires review
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+  - id: local.shell-command
+    languages: [python]
+    severity: ERROR
+    message: Shell command requires review
+    pattern-either:
+      - pattern: subprocess.$F(..., shell=True, ...)
+      - pattern: os.system(...)
+  - id: local.unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: Deserialization requires review
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: yaml.unsafe_load(...)

@@ -5,6 +5,7 @@ the worker a few read-only calls over a private Unix socket: allowlisted admin A
 methods of the local node (output passed through as raw bytes, never parsed as root)
 and, for research, the metrics file. The node admin socket itself stays root-only.
 """
+
 import base64
 import contextlib
 import json
@@ -15,7 +16,9 @@ import secrets
 import socket
 import stat
 import struct
-import subprocess
+
+# Security review: mock-compatible result records; no process is spawned here
+import subprocess  # nosec B404
 import threading
 from pathlib import Path
 
@@ -24,7 +27,9 @@ from core import Context, Failure, event, logged
 WORKER = "ygglab-worker"
 BROKER_DIR = Path("/run/yggctl-broker")
 LOCAL = frozenset({"getself", "getpeers", "gettree", "getpaths", "getsessions"})
-REMOTE = frozenset({"getnodeinfo", "debug_remotegetself", "debug_remotegetpeers", "debug_remotegettree"})
+REMOTE = frozenset(
+    {"getnodeinfo", "debug_remotegetself", "debug_remotegetpeers", "debug_remotegettree"}
+)
 LINE_LIMIT = 64 * 1024
 REPLY_LIMIT = 24 * 1024 * 1024
 METRICS_LIMIT = 32 * 1024 * 1024
@@ -44,8 +49,13 @@ def admin_argv(ctx, method, args):
     name = method.lower() if isinstance(method, str) else ""
     if name in LOCAL and args == []:
         tail = []
-    elif (name in REMOTE and isinstance(args, list) and len(args) == 1 and isinstance(args[0], str)
-          and re.fullmatch(r"key=[0-9a-fA-F]{64}", args[0])):
+    elif (
+        name in REMOTE
+        and isinstance(args, list)
+        and len(args) == 1
+        and isinstance(args[0], str)
+        and re.fullmatch(r"key=[0-9a-fA-F]{64}", args[0])
+    ):
         tail = [args[0]]
     else:
         raise Failure("broker_call_not_allowed")
@@ -64,7 +74,8 @@ class Broker:
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             raise Failure("broker_directory_untrusted")
-        os.chmod(directory, 0o711)  # traversable by the worker whatever the creator's umask was
+        # Security review: worker needs traversal only; socket is uid-owned 0600 and peer credentials checked
+        os.chmod(directory, 0o711)  # nosec B103
         self.path = directory / f"{role}-{self.unit_id}.sock"
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(self.path))
@@ -116,8 +127,11 @@ class Broker:
                     raise Failure("broker_bad_timeout")
                 argv = admin_argv(self.ctx, request.get("method"), request.get("args", []))
                 r = self.ctx.run(argv, timeout=timeout, check=False)
-                return {"rc": r.returncode, "stdout": base64.b64encode(r.stdout).decode(),
-                        "stderr": base64.b64encode(r.stderr[:65536]).decode()}
+                return {
+                    "rc": r.returncode,
+                    "stdout": base64.b64encode(r.stdout).decode(),
+                    "stderr": base64.b64encode(r.stderr[:65536]).decode(),
+                }
             if request.get("call") == "metrics" and self.role == "research":
                 data = self.ctx.read_state("metrics.jsonl", METRICS_LIMIT)
                 return {"data": None if data is None else base64.b64encode(data).decode()}
@@ -193,10 +207,16 @@ class WorkerContext(Context):
         if len(argv) < 4 or argv[1] != "-json" or argv[2] != f"-endpoint=unix://{self.p.node_sock}":
             raise Failure("broker_call_not_allowed")
         event("external_start", "yggdrasilctl")
-        reply = self.call({"call": "admin", "method": argv[3], "args": argv[4:], "timeout": timeout})
+        reply = self.call(
+            {"call": "admin", "method": argv[3], "args": argv[4:], "timeout": timeout}
+        )
         try:
-            r = subprocess.CompletedProcess(argv, int(reply["rc"]), base64.b64decode(reply["stdout"]),
-                                            base64.b64decode(reply["stderr"]))
+            r = subprocess.CompletedProcess(
+                argv,
+                int(reply["rc"]),
+                base64.b64decode(reply["stdout"]),
+                base64.b64decode(reply["stderr"]),
+            )
         except (KeyError, TypeError, ValueError):
             raise Failure("broker_invalid_reply") from None
         event("external_exit", "yggdrasilctl", f"rc={r.returncode}")

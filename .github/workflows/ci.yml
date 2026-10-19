@@ -1,4 +1,4 @@
-name: Regression tests
+name: Source quality and regressions
 
 on:
   push:
@@ -20,7 +20,11 @@ defaults:
 jobs:
   regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,16 +34,54 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
-      - name: Python syntax
+      - name: Prepare pinned development tools
         run: |
-          echo '[1/2] Python syntax'
-          python3 -B -c 'import ast, pathlib; files = sorted(pathlib.Path("yggctl").rglob("*.py")); [ast.parse(p.read_text(), filename=str(p)) for p in files]; print(f"processed={len(files)}/{len(files)} errors=0 remaining=0")'
-      - name: Python regression suites
-        working-directory: yggctl
+          python3 -B - <<'PY'
+          import subprocess, sys
+          result = subprocess.run([sys.executable, '-m', 'pip', '--isolated', 'install', '-r', 'requirements-dev.txt'], capture_output=True, timeout=180)
+          print(f'[1/2] Tool preparation exit={result.returncode}; raw installer streams discarded')
+          sys.exit(result.returncode)
+          PY
+      - name: Quality, collection, regressions and exact coverage
         run: |
-          start=$SECONDS
-          echo '[2/2] Console, research and atlas regression suites'
-          python3 -B tests.py
-          python3 -B -c 'from research.tests import run_suite; run_suite()'
-          python3 -B -c 'from atlas.tests import run_suite; run_suite()'
-          echo "[done] processed=3/3 suites errors=0 remaining=0 elapsed=$((SECONDS-start))s"
+          python3 -B - <<'PY'
+          import ast, json, os, pathlib, re, subprocess, sys, tempfile, time
+          start = time.monotonic()
+          with tempfile.TemporaryDirectory(prefix='yggctl-ci-', dir=os.environ['RUNNER_TEMP']) as state:
+              os.environ['COVERAGE_FILE'] = state + '/coverage.db'
+              os.environ['HYPOTHESIS_STORAGE_DIRECTORY'] = state + '/hypothesis'
+              files = sorted(pathlib.Path('yggctl').rglob('*.py')) + sorted(pathlib.Path('tests').glob('*.py'))
+              for path in files:
+                  ast.parse(path.read_text(), filename=str(path))
+              print(f'[1/9] Syntax processed={len(files)}/{len(files)} errors=0 remaining=8', flush=True)
+              commands = [
+                  ['ruff', 'check', '--no-cache', '--output-format=json', '.'],
+                  ['ruff', 'format', '--no-cache', '--check', '.'],
+                  ['mypy', '--cache-dir', state + '/mypy'],
+                  ['bandit', '-q', '-r', 'yggctl', 'tests', '-f', 'custom', '--msg-template', 'FINDING:{test_id}'],
+                  ['bandit', '-q', '-r', 'yggctl', 'tests', '-lll', '-f', 'json'],
+                  [sys.executable, '-m', 'pytest', '--collect-only', '-q', '-o', 'cache_dir=' + state + '/pytest'],
+                  [sys.executable, '-m', 'coverage', 'run', '-m', 'pytest', '-q', '-o', 'cache_dir=' + state + '/pytest'],
+                  [sys.executable, '-m', 'coverage', 'json', '-o', '-'],
+              ]
+              for index, command in enumerate(commands, 2):
+                  result = subprocess.run(command, capture_output=True, timeout=120)
+                  if result.returncode:
+                      print(f'[{index}/9] FAIL exit={result.returncode}; raw diagnostics discarded', flush=True)
+                      sys.exit(1)
+                  if index == 2 and json.loads(result.stdout) != []:
+                      raise SystemExit('invalid Ruff success report')
+                  if index == 6:
+                      report = json.loads(result.stdout)
+                      if report['errors'] or report['results']:
+                          raise SystemExit('Bandit scan incomplete or high findings')
+                  if index == 8 and not re.search(rb'\b[1-9][0-9]* passed\b', result.stdout):
+                      raise SystemExit('missing test-success witness')
+                  if index == 9:
+                      totals = json.loads(result.stdout)['totals']
+                      if not totals['num_statements'] or not totals['num_branches'] or totals['missing_lines'] or totals['missing_branches'] or totals['excluded_lines']:
+                          raise SystemExit('coverage must include every production statement and branch without exclusions')
+                      print('Coverage: 100% lines and branches; zero exclusions', flush=True)
+                  print(f'[{index}/9] PASS processed={index}/9 remaining={9-index} elapsed={time.monotonic()-start:.1f}s', flush=True)
+          print(f'[done] processed=9/9 errors=0 remaining=0 elapsed={time.monotonic()-start:.1f}s')
+          PY

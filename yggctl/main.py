@@ -1,5 +1,8 @@
 #!/usr/bin/python3
 """Operator CLI; no environment-selected paths or legacy unsafe fallback."""
+
+from typing import Callable
+
 import argparse
 import dataclasses
 import ipaddress
@@ -14,8 +17,21 @@ from pathlib import Path
 
 # -I removes PYTHONPATH and the repository cwd. Installed directory is root-owned.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core import (Context, Paths, Failure, VERSION, NODE, STACK, TIMER, logged, public_config, bounded_number,
-                  event, trace_live, finish_run)
+from core import (
+    Context,
+    Paths,
+    Failure,
+    VERSION,
+    NODE,
+    STACK,
+    TIMER,
+    logged,
+    public_config,
+    bounded_number,
+    event,
+    trace_live,
+    finish_run,
+)
 import checks
 import management
 import telemetry
@@ -64,22 +80,48 @@ def output(value):
 
 @logged
 def key(value):
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", value): raise Failure("expected_public_key_hex64")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        raise Failure("expected_public_key_hex64")
     return value.lower()
 
 
 @logged
 def http_probe(ctx, target):
-    if not re.fullmatch(r"\[[0-9A-Fa-f:]+\]:[0-9]{1,5}", target): raise Failure("expected_overlay_ipv6_port")
+    if not re.fullmatch(r"\[[0-9A-Fa-f:]+\]:[0-9]{1,5}", target):
+        raise Failure("expected_overlay_ipv6_port")
     host, port = target[1:].split("]:")
-    if ipaddress.ip_address(host) not in ipaddress.ip_network("200::/7") or not 1 <= int(port) <= 65535:
+    if (
+        ipaddress.ip_address(host) not in ipaddress.ip_network("200::/7")
+        or not 1 <= int(port) <= 65535
+    ):
         raise Failure("overlay_target_required")
-    r = ctx.run(["/usr/bin/curl", "-q", "--silent", "--show-error", "--noproxy", "",
-                 "--proxy", "socks5h://127.0.0.1:1080",
-                 "--connect-timeout", "5", "--max-time", "15", "--max-filesize", "131072", "--proto", "=http",
-                 "--output", "/dev/null", "--write-out",
-                 "%{http_code} %{time_connect} %{time_pretransfer} %{time_starttransfer} %{time_total}",
-                 "http://" + target + "/"], timeout=17, check=False)
+    r = ctx.run(
+        [
+            "/usr/bin/curl",
+            "-q",
+            "--silent",
+            "--show-error",
+            "--noproxy",
+            "",
+            "--proxy",
+            "socks5h://127.0.0.1:1080",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "15",
+            "--max-filesize",
+            "131072",
+            "--proto",
+            "=http",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{http_code} %{time_connect} %{time_pretransfer} %{time_starttransfer} %{time_total}",
+            "http://" + target + "/",
+        ],
+        timeout=17,
+        check=False,
+    )
     parts = r.stdout.decode().split()
     if len(parts) != 5 or not re.fullmatch(r"[0-9]{3}", parts[0]):
         raise Failure("overlay_invalid_metrics")
@@ -93,9 +135,11 @@ def http_probe(ctx, target):
     # proxy negotiation curl can finalize pretransfer/first-byte counters at
     # the timeout, so these counters do NOT prove that HTTP was reached.
     connect, ready, first, total = timings
-    print(f"curl_rc={r.returncode} HTTP={parts[0]} curl_connect_counter={connect:.6f}s "
-          f"pretransfer_counter={ready:.6f}s first_byte_counter={first:.6f}s total={total:.6f}s; "
-          "counters do NOT prove failure stage/remote RTT")
+    print(
+        f"curl_rc={r.returncode} HTTP={parts[0]} curl_connect_counter={connect:.6f}s "
+        f"pretransfer_counter={ready:.6f}s first_byte_counter={first:.6f}s total={total:.6f}s; "
+        "counters do NOT prove failure stage/remote RTT"
+    )
     if r.returncode:
         # Translate only known fixed curl messages; never echo arbitrary
         # server-controlled stderr. Unknown messages must stay unknown.
@@ -126,17 +170,25 @@ def socks_test(ctx, count=2):
     start = time.monotonic()
     if "sockets" not in ctx.parent_verified:
         checks.sockets(ctx)
-    targets = ("[21e:a51c:885b:7db0:166e:927:98cd:d186]:80", "[222:a8e4:50cd:55c:788e:b0a5:4e2f:a92c]:80")
+    targets = (
+        "[21e:a51c:885b:7db0:166e:927:98cd:d186]:80",
+        "[222:a8e4:50cd:55c:788e:b0a5:4e2f:a92c]:80",
+    )
     errors = 0
     for i in range(count):
-        print(f"[{i+1}/{count}] overlay HTTP; processed={i}/{count} remaining={count-i-1} "
-              f"elapsed={time.monotonic()-start:.2f}s ETA<={(count-i)*17}s speed<=128KiB/request", flush=True)
-        try: http_probe(ctx, targets[i % 2])
+        print(
+            f"[{i + 1}/{count}] overlay HTTP; processed={i}/{count} remaining={count - i - 1} "
+            f"elapsed={time.monotonic() - start:.2f}s ETA<={(count - i) * 17}s speed<=128KiB/request",
+            flush=True,
+        )
+        try:
+            http_probe(ctx, targets[i % 2])
         except Failure as exc:
             errors += 1
             print(f"FAIL overlay request: {exc} (bounded timeout/status/size)")
-    print(f"processed={count} errors={errors} elapsed={time.monotonic()-start:.2f}s")
-    if errors: raise Failure("overlay_e2e_failed")
+    print(f"processed={count} errors={errors} elapsed={time.monotonic() - start:.2f}s")
+    if errors:
+        raise Failure("overlay_e2e_failed")
 
 
 @logged
@@ -146,10 +198,13 @@ def selftest(ctx, offline=False):
         ctx.root()
         # No runtime files, backups, snapshots or collector mutation.
         from tests import run_suite
+
         run_suite()
         from research.tests import run_suite as research_suite
+
         research_suite()
         from atlas.tests import run_suite as atlas_suite
+
         atlas_suite()
         return
     checks.check(ctx)
@@ -163,10 +218,11 @@ def selftest(ctx, offline=False):
 @dataclasses.dataclass(frozen=True)
 class Command:
     """A CLI command and the rules dispatch enforces before calling its handler."""
-    handler: object
-    most: int = 0                    # most positional arguments; -1 lets the handler check
-    root: bool = True                # dispatch requires sudo before calling the handler
-    flags: frozenset = frozenset()   # allowed among: apply, force, full, recipient
+
+    handler: Callable[[Context, argparse.Namespace, list[str]], None]
+    most: int = 0  # most positional arguments; -1 lets the handler check
+    root: bool = True  # dispatch requires sudo before calling the handler
+    flags: frozenset = frozenset()  # allowed among: apply, force, full, recipient
 
 
 @logged
@@ -177,7 +233,11 @@ def do_help(ctx, args, a):
 @logged
 def do_version(ctx, args, a):
     print(f"yggctl {VERSION}; Python {sys.version.split()[0]}")
-    print(ctx.run(["/usr/bin/dpkg-query", "-W", "-f=${Version}\n", "yggdrasil"]).stdout.decode().strip())
+    print(
+        ctx.run(["/usr/bin/dpkg-query", "-W", "-f=${Version}\n", "yggdrasil"])
+        .stdout.decode()
+        .strip()
+    )
 
 
 @logged
@@ -207,8 +267,14 @@ def do_stats(ctx, args, a):
     telemetry.stats(ctx, bounded_number(a[0], 1, 72) if a else (6 if graph else 24), graph)
 
 
-API_VIEWS = {"peers": "getPeers", "stack-peers": "getPeers", "self": "getSelf", "tree": "getTree",
-             "paths": "getPaths", "sessions": "getSessions"}
+API_VIEWS = {
+    "peers": "getPeers",
+    "stack-peers": "getPeers",
+    "self": "getSelf",
+    "tree": "getTree",
+    "paths": "getPaths",
+    "sessions": "getSessions",
+}
 
 
 @logged
@@ -329,8 +395,14 @@ def do_diff(ctx, args, a):
 def do_doctor(ctx, args, a):
     # Secret-free allowlisted backup and structured data; no broad log/config tar.
     recovery.backup(ctx)
-    output({"node": ctx.unit(NODE), "stack": ctx.unit(STACK), "timer": ctx.unit(TIMER),
-            "pending_transaction": (ctx.p.state / "transaction.json").exists()})
+    output(
+        {
+            "node": ctx.unit(NODE),
+            "stack": ctx.unit(STACK),
+            "timer": ctx.unit(TIMER),
+            "pending_transaction": (ctx.p.state / "transaction.json").exists(),
+        }
+    )
 
 
 @logged
@@ -342,12 +414,14 @@ def do_report(ctx, args, a):
 @logged
 def do_research(ctx, args, a):
     import research
+
     output(research.command(ctx, a))
 
 
 @logged
 def do_atlas(ctx, args, a):
     import atlas
+
     output(atlas.command(ctx, a))
 
 
@@ -363,7 +437,8 @@ def journal_records(data):
     for line in data.splitlines():
         try:
             row = json.loads(line)
-            if not isinstance(row, dict): raise ValueError
+            if not isinstance(row, dict):
+                raise ValueError
             message = row.get("MESSAGE")
             if not isinstance(message, str):
                 message = "[non-text journal message omitted]"
@@ -371,15 +446,23 @@ def journal_records(data):
             # Decode nested JSON-style unicode escaping for detection only, never output it.
             for _ in range(4):
                 probe = re.sub(r"\\u([0-9a-fA-F]{4})", unicode_escape, probe)
-            if (re.search(r"(?i)private[\s_-]*key|group[\s_-]*password|password|token|secret|authorization",
-                          probe) or re.search(r"\\u[0-9a-fA-F]{4}", probe)):
+            if re.search(
+                r"(?i)private[\s_-]*key|group[\s_-]*password|password|token|secret|authorization",
+                probe,
+            ) or re.search(r"\\u[0-9a-fA-F]{4}", probe):
                 message = "[REDACTED sensitive journal message]"
                 event("state", "journal_redaction", "message_omitted")
             unit = row.get("_SYSTEMD_UNIT")
             at = row.get("__REALTIME_TIMESTAMP", "")
-            records.append({"unit": unit if unit in (NODE, STACK) else "unknown",
-                            "timestamp_us": at if isinstance(at, str) and re.fullmatch(r"[0-9]{1,20}", at)
-                            else "unknown", "message": message})
+            records.append(
+                {
+                    "unit": unit if unit in (NODE, STACK) else "unknown",
+                    "timestamp_us": at
+                    if isinstance(at, str) and re.fullmatch(r"[0-9]{1,20}", at)
+                    else "unknown",
+                    "message": message,
+                }
+            )
         except (ValueError, TypeError, RecursionError):
             raise Failure("invalid_journal_json_no_raw_output") from None
     return records
@@ -393,7 +476,18 @@ def unicode_escape(match):
 @logged
 def do_logs(ctx, args, a):
     n = bounded_number(a[0], 1, 1000) if a else 50
-    command = ["/usr/bin/journalctl", "-u", NODE, "-u", STACK, "--no-pager", "-o", "json", "-n", str(n)]
+    command = [
+        "/usr/bin/journalctl",
+        "-u",
+        NODE,
+        "-u",
+        STACK,
+        "--no-pager",
+        "-o",
+        "json",
+        "-n",
+        str(n),
+    ]
     if args.command == "events":
         command += ["--since", f"{bounded_number(a[0], 1, 72) if a else 6} hours ago"]
     output({"logs": journal_records(ctx.run(command).stdout)})
@@ -402,7 +496,9 @@ def do_logs(ctx, args, a):
 @logged
 def do_firewall_status(ctx, args, a):
     checks.policy_gate(ctx)
-    output({"accepted_surface": "unchanged", "watchdog": "independent; no baseline/allowlist rewrite"})
+    output(
+        {"accepted_surface": "unchanged", "watchdog": "independent; no baseline/allowlist rewrite"}
+    )
 
 
 @logged
@@ -417,7 +513,11 @@ def do_bench(ctx, args, a):
     socks_test(ctx, bounded_number(a[0], 1, 3) if a else 1)
 
 
-REMOTE_DEBUG = {"self": "debug_remotegetself", "peers": "debug_remotegetpeers", "tree": "debug_remotegettree"}
+REMOTE_DEBUG = {
+    "self": "debug_remotegetself",
+    "peers": "debug_remotegetpeers",
+    "tree": "debug_remotegettree",
+}
 
 
 @logged
@@ -458,8 +558,10 @@ def do_survey(ctx, args, a):
 
 @logged
 def do_discover(ctx, args, a):
-    print("Offline public-peers catalogue: Iggdrasil_full_repo/public-peers; "
-          "no root git pull or TCP probe masquerading as QUIC test")
+    print(
+        "Offline public-peers catalogue: Iggdrasil_full_repo/public-peers; "
+        "no root git pull or TCP probe masquerading as QUIC test"
+    )
 
 
 @logged
@@ -468,12 +570,26 @@ def do_unit_show(ctx, args, a):
         raise Failure("requires_reviewed_deployment_or_firewall_review")
     nameserver = args.command == "nameserver"
     output(ctx.unit(STACK if nameserver else TIMER))
-    print("nameserver not added; SOCKS remains 127.0.0.1:1080" if nameserver else "trusted deployer owns timer")
+    print(
+        "nameserver not added; SOCKS remains 127.0.0.1:1080"
+        if nameserver
+        else "trusted deployer owns timer"
+    )
 
 
 APPLY = frozenset({"apply"})
-SERVICES = ("start", "stop", "restart", "enable", "disable",
-            "stack-start", "stack-stop", "stack-restart", "stack-enable", "stack-disable")
+SERVICES = (
+    "start",
+    "stop",
+    "restart",
+    "enable",
+    "disable",
+    "stack-start",
+    "stack-stop",
+    "stack-restart",
+    "stack-enable",
+    "stack-disable",
+)
 COMMANDS = {
     "help": Command(do_help, root=False),
     "--help": Command(do_help, root=False),
@@ -543,7 +659,9 @@ def dispatch(ctx, args):
         ctx.root()
     if spec is None:
         if cmd in LEGACY_DISABLED:
-            raise Failure("legacy_high_risk_operation_disabled_requires_separate_custody_review_and_tests")
+            raise Failure(
+                "legacy_high_risk_operation_disabled_requires_separate_custody_review_and_tests"
+            )
         raise Failure("unknown_command_use_help")
     if cmd in sandbox.ROLE_OF and not sandbox.inside() and ctx.p == Paths():
         # On the live system these run sandboxed as an unprivileged user (see sandbox.py).
@@ -552,6 +670,7 @@ def dispatch(ctx, args):
             raise Failure(f"sandboxed_{cmd}_failed:rc={rc}")
         return
     spec.handler(ctx, args, a)
+
 
 # Only command words documented in HELP reach the run summary; anything else is "other".
 RUN = {"command": "other"}
@@ -566,7 +685,7 @@ def run_label(command):
 
 
 @logged
-def interrupted(signum, frame):
+def interrupted(_signum, _frame):
     raise Failure("interrupted_rollback_requested")
 
 
@@ -582,8 +701,10 @@ def main():
     parser.add_argument("--help", action="store_true")
     parser.add_argument("--trace", action="store_true")
     args = parser.parse_intermixed_args()
-    if args.help: args.command = "help"
-    if args.trace: trace_live()
+    if args.help:
+        args.command = "help"
+    if args.trace:
+        trace_live()
     RUN["command"] = run_label(args.command)
     signal.signal(signal.SIGTERM, interrupted)
     start = time.monotonic()
@@ -591,12 +712,15 @@ def main():
         dispatch(sandbox.worker_context() or Context(), args)
     except (Failure, OSError, ValueError, KeyError, TypeError) as exc:
         label = str(exc) if isinstance(exc, Failure) else "unavailable_or_invalid_data"
-        print(f"FAIL {label}; processed=0 errors=1 elapsed={time.monotonic()-start:.2f}s", file=sys.stderr)
+        print(
+            f"FAIL {label}; processed=0 errors=1 elapsed={time.monotonic() - start:.2f}s",
+            file=sys.stderr,
+        )
         return 77 if label.startswith("root_required") else 1
     except KeyboardInterrupt:
         print("FAIL interrupted; rollback attempted if transaction active", file=sys.stderr)
         return 130
-    print(f"[done] errors=0 elapsed={time.monotonic()-start:.2f}s")
+    print(f"[done] errors=0 elapsed={time.monotonic() - start:.2f}s")
     return 0
 
 

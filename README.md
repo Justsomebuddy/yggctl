@@ -44,6 +44,12 @@ cd ..
 The suites use temporary directories, mocked system commands and local Unix
 sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
+The stdlib suites contain 100 console + 23 research + 33 atlas tests.
+With QA dependencies, Pytest also runs supplemental adversarial/property cases:
+243 unique tests, with measured 100% production statement and branch coverage
+on Python 3.14.8. This does not qualify a live deployment or prove correctness.
+For lint, types, Pytest discovery and coverage, see the
+[QA instructions](docs/VERIFICATION.md#reproducing-source-checks).
 
 To inspect help only:
 

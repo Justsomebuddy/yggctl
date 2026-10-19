@@ -6,6 +6,7 @@ lock for research), then serves the worker read-only calls through broker.py. Th
 sees no node keys and only its own store; research has no network, the network commands
 reach only localhost (the SOCKS proxy), atlas keeps TCP/UDP for the public-peer catalogue.
 """
+
 import contextlib
 import os
 import re
@@ -16,7 +17,16 @@ from core import logged, trace_is_live
 
 UNIT_PREFIX = "yggctl-sandbox-"
 STATE = "/var/lib/yggdrasil-lab"
-REMOTE_COMMANDS = ("ping", "bench", "socks-test", "nodeinfo", "whois", "debug-remote", "survey", "traceroute")
+REMOTE_COMMANDS = (
+    "ping",
+    "bench",
+    "socks-test",
+    "nodeinfo",
+    "whois",
+    "debug-remote",
+    "survey",
+    "traceroute",
+)
 ROLE_OF = {"atlas": "atlas", "research": "research", **{c: "remote" for c in REMOTE_COMMANDS}}
 COMMON = (
     f"User={broker.WORKER}",
@@ -51,9 +61,16 @@ COMMON = (
 )
 ROLES = {
     "atlas": (f"BindPaths={STATE}/atlas", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"),
-    "research": (f"BindPaths={STATE}/research", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX"),
-    "remote": ("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", "IPAddressAllow=localhost",
-               "IPAddressDeny=any"),
+    "research": (
+        f"BindPaths={STATE}/research",
+        "PrivateNetwork=yes",
+        "RestrictAddressFamilies=AF_UNIX",
+    ),
+    "remote": (
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        "IPAddressAllow=localhost",
+        "IPAddressDeny=any",
+    ),
 }
 
 
@@ -97,8 +114,15 @@ def properties(role):
 def command(role, cmd, args, main_path, unit_id, *, trace=False):
     """systemd-run argv for one sandboxed yggctl command, and the unit to stop on interrupt."""
     unit = f"{UNIT_PREFIX}{role}-{unit_id}.service"
-    argv = ["/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
-            "--service-type=exec", f"--unit={unit}"]
+    argv = [
+        "/usr/bin/systemd-run",
+        "--quiet",
+        "--wait",
+        "--pipe",
+        "--collect",
+        "--service-type=exec",
+        f"--unit={unit}",
+    ]
     for prop in properties(role):
         argv += ["-p", prop]
     argv += ["--", "/usr/bin/python3", "-I", "-B", str(main_path)]

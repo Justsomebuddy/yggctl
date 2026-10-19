@@ -30,7 +30,9 @@ revert is not sufficient. Check provenance and licensing before adding material.
 2. Add synthetic tests for changed behavior, failures and security boundaries.
    Use the existing secret-safe `@logged` convention for production functions;
    never log credentials, private keys or raw untrusted command output.
-3. Run all three README suites and inspect the diff, new files and documentation
+3. Run the configured lint/type/security checks and Pytest discovery/coverage
+   in [Verification](docs/VERIFICATION.md), plus all three README suites.
+   Inspect the diff, new files and documentation
    links. Update the changelog for user-visible changes. No package or Python
    upgrade is part of routine testing.
 4. Test operational behavior only in an isolated disposable environment, never
@@ -39,6 +41,23 @@ revert is not sufficient. Check provenance and licensing before adding material.
    privileges, configuration and manifests, with exact rollback and explicit
    approval from that installation's operator. No automatic sync to an existing
    installation is provided.
+
+### Integrity manifests and shared fixtures
+
+`test_support.py` is imported by all three regression suites. The console's
+root-integrity gate therefore requires it alongside `tests.py` and the runtime
+modules. Any external provisioner must include its exact hash in the reviewed
+root-owned manifest; omitting it fails closed. Updating this source repository
+never updates an installed manifest or authorizes deployment. Keep fixtures
+synthetic and logged, and avoid inheriting one test suite from another: Pytest
+would otherwise collect inherited cases more than once.
+
+Keep new edge/property tests under `tests/`, grouped by responsibility, rather
+than growing the legacy runtime test modules. Production coverage must retain
+all reachable statements/branches with meaningful assertions. Do not add
+exclusions or weaken validation to satisfy the gate. Property tests use a fixed
+profile and no persistent example database. Bounded mutation/fuzz evidence and
+its limitations must stay distinct from statement/branch coverage.
 
 ## Publication checklist
 
@@ -55,8 +74,11 @@ Before a public visibility decision:
   workflow or mocked test is not live-integration evidence.
 * Review external prerequisites, supported versions and known limitations.
   Do not promise generic installation or cross-platform support without tests.
-* Establish a working private security-reporting route, review repository
-  access, Actions permissions and branch-review settings. Do not claim that
-  CODEOWNERS alone enforces review or that protections are configured by source.
+* Keep the GitHub Issues/pull-request contribution and reporting workflow
+  documented, including the sensitive-data rules in [SECURITY.md](SECURITY.md).
+  A separate external reporting channel is not a publication prerequisite.
+  Review repository access, Actions permissions and branch-review settings.
+  Do not claim that CODEOWNERS alone enforces review or that protections are
+  configured by source.
 * Confirm the visibility change explicitly with the owner. Maintain this as an
   independent community tool unless upstream explicitly agrees otherwise.
