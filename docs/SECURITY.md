@@ -5,6 +5,11 @@ services and change configuration. Review paths, identities, permissions,
 firewall rules, dependencies and rollback before any isolated operational test.
 The repository intentionally provides no installer or host policy.
 
+* Broker permissions are selected by the parent, not by request data. Research
+  can read only local admin methods and metrics. Atlas can additionally issue
+  `debug_remotegetself`, `debug_remotegetpeers` and `debug_remotegettree`;
+  only the remote role can additionally request `getnodeinfo`. All workers
+  start after a locked parent integrity check; failure prevents launch.
 * Broker restrictions depend on socket ownership/mode, directory permissions,
   systemd confinement and surrounding configuration. Offline tests of a local
   socket do not prove a deployed root/worker boundary.

@@ -1,8 +1,9 @@
 """Sandboxed commands: atlas, research and the network commands that handle data from
 other nodes run in a transient systemd unit as the unprivileged ygglab-worker user.
 
-The root parent first runs what needs root (integrity, the sockets check, the console
-lock for research), then serves the worker read-only calls through broker.py. The worker
+The root parent first runs what needs root (integrity for every role, the sockets check
+for the commands that read it, the console lock for research), then serves the worker
+read-only calls through broker.py. The worker
 sees no node keys and only its own store; research has no network, the network commands
 reach only localhost (the SOCKS proxy), atlas keeps TCP/UDP for the public-peer catalogue.
 """
@@ -138,9 +139,9 @@ def run(ctx, cmd, args, main_path):
     with contextlib.ExitStack() as stack:
         if role == "research":
             stack.enter_context(ctx.locked())  # research expects the console lock for its whole run
-        if role in ("atlas", "research"):
-            with ctx.locked():
-                checks.integrity(ctx)
+        with ctx.locked():
+            # Every sandboxed role gets the integrity check the worker is told about.
+            checks.integrity(ctx)
         if cmd in ("bench", "socks-test"):
             checks.sockets(ctx)
         served = stack.enter_context(broker.Broker(ctx, role))

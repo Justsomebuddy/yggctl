@@ -10,7 +10,7 @@ It is run as a source script; this repository is not a pip distribution.
 | `management.py` | Service controls and peer/config transactions |
 | `telemetry.py` | Local metrics, reports and alert handoff |
 | `recovery.py` | Deployment-specific backup and recovery operations |
-| `sandbox.py`, `broker.py` | Worker launch and allowlisted local admin reads |
+| `sandbox.py`, `broker.py` | Worker launch, mandatory integrity gate and role-scoped admin reads |
 | `research/`, `atlas/` | Bounded observed-network collection and analysis |
 
 Observations are not a census of the entire Yggdrasil network. Source code

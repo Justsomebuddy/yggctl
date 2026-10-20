@@ -4,6 +4,28 @@
 
 ### Fixed
 
+- Scope broker admin methods by the parent-selected role (#5, #4): research
+  stays local-only, Atlas retains exactly its three remote debug reads, and
+  remote commands retain the existing read-only method set. Requests cannot
+  select their own role; unknown roles and malformed arguments fail closed.
+- Verify integrity under the console lock before starting every sandboxed
+  command. An integrity failure starts neither the broker nor the worker.
+- Add an offline real Unix-socket Atlas crawl regression, the full role matrix,
+  and all-command integrity success/failure ordering tests. No host networking,
+  node configuration or sandbox properties are broadened.
+
+- Scope the broker's admin allowlist by sandbox role. `research` keeps local
+  reads but can no longer ask the parent to query other nodes, which is what
+  `PrivateNetwork=yes` on the research unit already implies. `atlas` keeps the
+  remote methods its crawl needs, and `remote` is unchanged.
+- Report what the parent actually verified instead of asserting it. The integrity
+  check now runs for every sandboxed role before the unit starts, so the claim the
+  worker relies on is true for commands that previously skipped it (`ping`,
+  `nodeinfo`, `whois`, `debug-remote`, `survey`, `traceroute`). The sockets check
+  keeps its existing scope, which matches the single command that reads it.
+- Add role-allowlist and per-role integrity regressions; no live deployment
+  behaviour is claimed by these tests.
+
 - Keep historical reports available across the collector's complete 10,000–12,000
   record retention cycle (#2). The bounded reader now accepts the pre-compaction
   window; the existing 10,000-record retained tail and other validation remain.

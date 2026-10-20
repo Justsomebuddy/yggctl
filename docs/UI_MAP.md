@@ -10,3 +10,9 @@
 No new command, option, output schema, external request or automatic data cleanup.
 These are synthetic offline regression contracts, not proof of any deployment's
 systemd provisioning, privilege isolation or overlay connectivity.
+
+## Sandbox command boundary (5.7.6)
+
+All `atlas`, `research` and remote commands fail before worker launch when the
+parent integrity check fails. Research broker requests stay local-only; Atlas
+crawl retains its three remote debug reads. Command syntax/output is unchanged.
