@@ -114,7 +114,7 @@ class BrokerEdges(ConsoleFixture):
             worker.call({"long": "request"})
         for reply, label in (
             (b"", "broker_unavailable"),
-            (b"x" * (broker.REPLY_LIMIT + 1), "broker_unavailable"),
+            (b"x" * (broker.METRICS_REPLY_LIMIT + 1), "broker_unavailable"),
             (b"not json", "broker_invalid_reply"),
             (b"[]", "broker_invalid_reply"),
             (b'{"error":"fixed_failure"}', "fixed_failure"),

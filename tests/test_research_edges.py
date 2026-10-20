@@ -149,7 +149,7 @@ class ResearchEdges(ObservedFixture):
         for records, hours, label in (
             ([], 0, "invalid_window"),
             (None, 1, "metric_record_limit"),
-            ([{}] * 10001, 1, "metric_record_limit"),
+            ([{}] * 12001, 1, "metric_record_limit"),
         ):
             with self.assertRaisesRegex(Failure, label):
                 metrics.summary(records, hours, NOW)

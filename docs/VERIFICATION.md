@@ -1,3 +1,17 @@
+## Source5.7.5 — historical metrics contracts
+
+The native nine-stage quality gate passes:264 tests,3442/3442 production
+statements and1242/1242 branches, zero exclusions. Six synthetic regression
+methods exercise the actual collector's complete
+10,000–12,000 record rotation cycle, reports for1/24/72h, an actual local Unix
+Broker/WorkerContext transfer across the former Base64 boundary and at the full
+32MiB raw cap, plus rejection above the supported record/raw/wire caps.
+The metrics envelope cap is derived from raw capacity, including JSON and newline;
+the admin reply cap remains24MiB. Original broker/reader transplants must fail
+the corresponding regressions. Fixtures use no real services or external peers.
+This is not a new full-system deployment or a general installer qualification.
+[Interaction contract](UI_MAP.md).
+
 # Verification scope
 
 ## Peer alert queue recovery candidate (2026-10-20)

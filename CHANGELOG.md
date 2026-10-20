@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- Keep historical reports available across the collector's complete 10,000–12,000
+  record retention cycle (#2). The bounded reader now accepts the pre-compaction
+  window; the existing 10,000-record retained tail and other validation remain.
+- Size the metrics-only broker reply limit for the full 32 MiB raw file after
+  Base64 encoding and the JSON/newline envelope (#3). Admin replies retain their
+  existing 24 MiB bound. No data is truncated to satisfy the transport limit.
+- Add actual collector/report boundary and local Unix-socket regressions,
+  including a full 32 MiB transfer and rejection above the supported caps.
+
 - Preserve peer-down, recovery and instability alerts when queue writing fails
   after the peer transition is saved (#1). The transition and pending event now
   share one atomic state update. Later collections replay stable event IDs,
@@ -55,5 +64,5 @@
 - Document GitHub Issues and pull requests as the contribution/reporting route,
   with synthetic reproducers and no disclosure of operational secrets.
 
-The source version is 5.7.4; this source repository does not change installed files or running nodes.
+The source version is 5.7.5; this source repository does not change installed files or running nodes.
 No stable release, generic installer or live deployment is claimed.

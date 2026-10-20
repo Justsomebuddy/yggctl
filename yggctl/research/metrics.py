@@ -6,7 +6,7 @@ import datetime as dt
 import hashlib
 import urllib.parse
 
-from core import Failure, logged
+from core import Failure, logged, METRIC_RECORD_LIMIT
 from .model import instant, latency, public_key
 
 
@@ -43,7 +43,7 @@ def peer_identity(value):
 def summary(records, hours, now):
     if type(hours) is not int or not 1 <= hours <= 72:
         raise Failure("research_invalid_window")
-    if not isinstance(records, list) or len(records) > 10000:
+    if not isinstance(records, list) or len(records) > METRIC_RECORD_LIMIT:
         raise Failure("research_metric_record_limit")
     end = instant(now)
     begin = end - dt.timedelta(hours=hours)

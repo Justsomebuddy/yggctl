@@ -28,7 +28,11 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.7.4"
+VERSION = "5.7.5"
+# The reader accepts the writer's full pre-compaction retention window.
+METRIC_RETENTION = 10000
+METRIC_RECORD_LIMIT = METRIC_RETENTION * 6 // 5
+METRICS_LIMIT = 32 * 1024 * 1024
 NODE = "yggdrasil-lab.service"
 STACK = "yggstack-lab.service"
 TIMER = "ygg-metrics.timer"

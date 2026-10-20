@@ -22,7 +22,7 @@ import subprocess  # nosec B404
 import threading
 from pathlib import Path
 
-from core import Context, Failure, event, logged
+from core import Context, Failure, event, logged, METRICS_LIMIT
 
 WORKER = "ygglab-worker"
 BROKER_DIR = Path("/run/yggctl-broker")
@@ -32,7 +32,9 @@ REMOTE = frozenset(
 )
 LINE_LIMIT = 64 * 1024
 REPLY_LIMIT = 24 * 1024 * 1024
-METRICS_LIMIT = 32 * 1024 * 1024
+# ceil(raw / 3) * 4, plus the exact compact {"data":""}\n envelope.
+# Keep admin replies at their existing, smaller bound.
+METRICS_REPLY_LIMIT = 4 * ((METRICS_LIMIT + 2) // 3) + 12
 
 
 @logged
@@ -184,10 +186,11 @@ class WorkerContext(Context):
         line = json.dumps(request, separators=(",", ":")).encode()
         if len(line) > LINE_LIMIT:
             raise Failure("broker_request_too_large")
+        reply_limit = METRICS_REPLY_LIMIT if request.get("call") == "metrics" else REPLY_LIMIT
         with self.call_lock:
             self.conn.sendall(line + b"\n")
-            reply = self.reader.readline(REPLY_LIMIT + 1)
-        if not reply or len(reply) > REPLY_LIMIT:
+            reply = self.reader.readline(reply_limit + 1)
+        if not reply or len(reply) > reply_limit:
             raise Failure("broker_unavailable")
         try:
             value = json.loads(reply)

@@ -11,13 +11,24 @@ import stat
 import statistics
 import time
 
-from core import Failure, NODE, STACK, logged, read_regular, atomic, timestamp, event
+from core import (
+    Failure,
+    NODE,
+    STACK,
+    logged,
+    read_regular,
+    atomic,
+    timestamp,
+    event,
+    METRIC_RETENTION,
+    METRICS_LIMIT,
+)
 from checks import peers
 
 
 @logged
 def rows(ctx, name="metrics.jsonl"):
-    data = ctx.read_state(name, 32 * 1024 * 1024)
+    data = ctx.read_state(name, METRICS_LIMIT)
     if data is None:
         return []
     # An append in progress (or one torn by a crash) leaves an incomplete last line; skip it.
@@ -53,9 +64,9 @@ def metric_records(fd, size):
 
 
 @logged
-def append(ctx, name, row, keep=10000):
+def append(ctx, name, row, keep=METRIC_RETENTION):
     """Compact at >120% of `keep` RECORDS, independent of the last row's size."""
-    if type(keep) is not int or not 1 <= keep <= 10000:
+    if type(keep) is not int or not 1 <= keep <= METRIC_RETENTION:
         raise Failure("invalid_metric_retention")
     path = ctx.p.state / name
     line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
@@ -67,7 +78,7 @@ def append(ctx, name, row, keep=10000):
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise Failure("metric_file_not_regular")
-            if info.st_size + len(line) > 32 * 1024 * 1024:
+            if info.st_size + len(line) > METRICS_LIMIT:
                 raise Failure("metric_file_size_limit")
             if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
                 tail = os.pread(fd, min(info.st_size, 1 << 20), max(0, info.st_size - (1 << 20)))

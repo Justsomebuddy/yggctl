@@ -12,7 +12,7 @@ import checks
 import telemetry
 from . import model, metrics
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 LIMIT = 256
 BYTE_LIMIT = 2 * 1024 * 1024
 
