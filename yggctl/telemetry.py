@@ -132,20 +132,112 @@ def notify(ctx, action):
 PEER_DOWN_MINUTES = 10
 UNSTABLE_RECONNECTS = 3  # reconnects within the last hour that make a peer "unstable"
 UNSTABLE_REPEAT_HOURS = 6  # at most one "unstable" alert per peer in this time
+PEER_STATE_LIMIT = 1 << 20
+PEER_PENDING_LIMIT = 1000  # no larger than the alert queue's retained record count
+PEER_ALERT_KINDS = ("ygg-peer-down", "ygg-peer-up", "ygg-peer-unstable")
+
+
+@logged
+def load_peer_state(ctx):
+    """Accept legacy state, but never silently discard a damaged durable outbox."""
+    try:
+        raw = ctx.read_state("alert-state.json", PEER_STATE_LIMIT)
+        state = json.loads(b"{}" if raw is None else raw)
+    except ValueError:
+        raise Failure("alert_state_invalid") from None
+    if not isinstance(state, dict):
+        raise Failure("alert_state_invalid")
+    pending = state.get("pending", [])
+    if not isinstance(pending, list) or len(pending) > PEER_PENDING_LIMIT:
+        raise Failure("alert_pending_invalid")
+    seen = set()
+    for item in pending:
+        if (
+            not isinstance(item, dict)
+            or item.get("kind") not in PEER_ALERT_KINDS
+            or not isinstance(item.get("ts"), str)
+            or not isinstance(item.get("peer"), str)
+            or "id" not in item
+        ):
+            raise Failure("alert_pending_invalid")
+        aid = alert_id(item)
+        if aid in seen:
+            raise Failure("alert_pending_duplicate_id")
+        seen.add(aid)
+    return state
+
+
+@logged
+def save_peer_state(ctx, state):
+    data = (json.dumps(state, sort_keys=True) + "\n").encode()
+    if len(data) > PEER_STATE_LIMIT:
+        raise Failure("alert_state_size_limit")
+    atomic(ctx.p.state / "alert-state.json", data, 0o600)
+
+
+@logged
+def sync_alert_queue(ctx):
+    """Even a complete record observed after a failed fsync needs a new durability barrier."""
+    fd = os.open(
+        ctx.p.state / "alerts.jsonl", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Failure("alert_queue_not_regular")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent = os.open(ctx.p.state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+@logged
+def flush_peer_alerts(ctx):
+    """Replay durable pending events under the shared producer/forwarder lock.
+
+    A crash after append but before acknowledgement reuses the same ID, checks the
+    queued content and syncs both queue and directory before clearing pending.
+    This is queue recovery, not exactly-once external delivery or a human ACK.
+    """
+    with ctx.locked():
+        state = load_peer_state(ctx)
+        pending = state.get("pending", [])
+        if not pending:
+            return
+        queued = {alert_id(row): row for row in rows(ctx, "alerts.jsonl")}
+        for item in pending:
+            aid = item["id"]
+            if aid in queued:
+                if queued[aid] != item:
+                    raise Failure("alert_pending_id_conflict")
+                event("state", "peer_outbox", "already_queued")
+            else:
+                append(ctx, "alerts.jsonl", item, PEER_PENDING_LIMIT)
+                event("alert", "peer_outbox", item["kind"])
+        sync_alert_queue(ctx)
+        state["pending"] = []
+        save_peer_state(ctx, state)
+        event("state", "peer_outbox", "acknowledged")
 
 
 @logged
 def peer_alerts(ctx, sample, uptimes=None):
+    with ctx.locked():
+        return stage_peer_alerts(ctx, sample, uptimes)
+
+
+@logged
+def stage_peer_alerts(ctx, sample, uptimes=None):
     """Changes worth an alert: a peer down for PEER_DOWN_MINUTES, its recovery, and a peer
     that reconnected UNSTABLE_RECONNECTS times within an hour (from the node's per-peer
     uptime, which also catches drops shorter than the sampling interval). State lives in
-    alert-state.json and is rewritten only when something changes."""
-    try:
-        state = json.loads(ctx.read_state("alert-state.json", 65536) or b"{}")
-    except ValueError:
-        state = {}
-    if not isinstance(state, dict):
-        state = {}
+    alert-state.json and is rewritten only when something changes. The caller holds
+    ctx.locked(). When notifications are enabled, events and transitions are saved
+    together in that one atomic file, before anything is appended to the queue."""
+    state = load_peer_state(ctx)
     down = state.get("down", {}) if isinstance(state.get("down"), dict) else {}
     starts = state.get("starts", {}) if isinstance(state.get("starts"), dict) else {}
     unstable = state.get("unstable", {}) if isinstance(state.get("unstable"), dict) else {}
@@ -188,11 +280,23 @@ def peer_alerts(ctx, sample, uptimes=None):
     new_starts, new_unstable = reconnects(
         starts, unstable, uptimes or {}, now, peers, up, total, changes
     )
-    new_state = {"down": tracked, "starts": new_starts, "unstable": new_unstable}
-    if new_state != {"down": down, "starts": starts, "unstable": unstable}:
-        atomic(
-            ctx.p.state / "alert-state.json", json.dumps(new_state, sort_keys=True) + "\n", 0o600
-        )
+    pending = state.get("pending", [])
+    enqueue = bool(changes) and notify_state(ctx) == "on"
+    if enqueue:
+        if len(pending) + len(changes) > PEER_PENDING_LIMIT:
+            raise Failure("alert_pending_limit")
+        pending = pending + [
+            {"ts": sample["ts"], "id": secrets.token_hex(16), **change} for change in changes
+        ]
+    new_state = {
+        "down": tracked,
+        "starts": new_starts,
+        "unstable": new_unstable,
+        "pending": pending,
+    }
+    if new_state != state:
+        save_peer_state(ctx, new_state)
+        event("state", "peer_outbox", "staged" if enqueue else "tracking_saved")
     return changes
 
 
@@ -441,16 +545,13 @@ def collect(ctx):
         if sample["up"] == 0 or sample["stack_up"] == 0:
             sample["errors"].append("no_up_peers")
         append(ctx, "metrics.jsonl", sample)
-        changes = peer_alerts(ctx, sample, uptimes)
-        if notify_state(ctx) == "on":
-            for change in changes:
-                append(
-                    ctx,
-                    "alerts.jsonl",
-                    {"ts": sample["ts"], "id": secrets.token_hex(8), **change},
-                    1000,
-                )
-                event("alert", "collect", change["kind"])
+        enabled = notify_state(ctx) == "on"
+        if enabled:
+            # Drain first: a full recoverable outbox must not block its own retry.
+            flush_peer_alerts(ctx)
+        peer_alerts(ctx, sample, uptimes)
+        if enabled:
+            flush_peer_alerts(ctx)
             if sample["errors"]:
                 key = "collect:" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H")
                 if not any(a.get("key") == key for a in rows(ctx, "alerts.jsonl")):

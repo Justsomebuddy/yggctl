@@ -1,5 +1,23 @@
 # Verification scope
 
+## Peer alert queue recovery candidate (2026-10-20)
+
+Source 5.7.4 adds 15 synthetic producer tests, including a real abrupt child-process
+exit after queue commit, one-shot EIO, torn writes, partial batches, fsync and
+acknowledgement failures, restart replay, corrupt state, notification disabling,
+capacity limits, ID conflicts and concurrent collectors. The current local
+candidate passed 258 tests and the configured nine-stage syntax/lint/format/type/
+security/test gate offline on Python 3.14.8. Production coverage is 3438/3438
+statements and 1242/1242 branches, with zero exclusions. These remain finite tests,
+not a proof of crash safety or external delivery.
+
+The report-export test's synthetic capture clock is now fixed explicitly rather
+than depending on the day the suite runs. Runtime report behavior is unchanged.
+QA packages are reused from an existing read-only tool environment; no package or
+interpreter was installed or upgraded. Static Python tools use their available
+Python 3.11 host while checking the configured Python 3.14 target; runtime tests
+use Python 3.14.8. Check Actions for the exact published commit's hosted result.
+
 ## Local candidate qualification (2026-10-19)
 
 The unreleased 5.7.3 working tree was tested offline on Linux with Python

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve peer-down, recovery and instability alerts when queue writing fails
+  after the peer transition is saved (#1). The transition and pending event now
+  share one atomic state update. Later collections replay stable event IDs,
+  including after interrupted writes, partial batches or acknowledgement failure.
+- Sync the queue and its directory before retiring pending events, including
+  records found during replay. Reject corrupt outbox state instead of discarding
+  it. Notifications disabled by the operator retain already-pending events.
+- Add synthetic fault/restart/concurrent-collector regressions. This recovers
+  queue publication, not exactly-once external delivery or a human acknowledgement.
+
 ### Added
 
 - Console-only source repository, MIT license, contributor guidance, security
@@ -43,5 +55,5 @@
 - Document GitHub Issues and pull requests as the contribution/reporting route,
   with synthetic reproducers and no disclosure of operational secrets.
 
-The source version is 5.7.3; installed files and the running node are unchanged.
+The source version is 5.7.4; this source repository does not change installed files or running nodes.
 No stable release, generic installer or live deployment is claimed.

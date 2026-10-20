@@ -82,8 +82,18 @@ class ExportEdges(ObservedFixture):
     @logged
     def test_research_report_changes_peer_history_and_size_guard(self):
         root = research.folder(self.ctx, True)
-        first = self.observation()
-        second = self.observation()
+        with patch.object(
+            acquisition,
+            "timestamp",
+            side_effect=[
+                "2026-10-19T09:58:00+00:00",
+                "2026-10-19T09:58:01+00:00",
+                "2026-10-19T09:59:00+00:00",
+                "2026-10-19T09:59:01+00:00",
+            ],
+        ):
+            first = self.observation()
+            second = self.observation()
         for value in (first, second):
             atomic(root / ("snapshot-" + value["id"] + ".json"), json.dumps(value))
         row = {

@@ -74,15 +74,15 @@ class TelemetryEdges(ConsoleFixture):
             "ts": "2026-10-19T10:00:00+00:00",
             "peers": [{"r": URI, "up": False}],
         }
-        for data in (
-            b"not json",
-            b"[]",
-            json.dumps(
-                {"down": {URI: {"since": "invalid"}}, "starts": [], "unstable": []}
-            ).encode(),
-        ):
+        for data in (b"not json", b"[]"):
             atomic(self.paths.state / "alert-state.json", data)
-            self.assertEqual(tm.peer_alerts(self.ctx, sample), [])
+            with self.assertRaisesRegex(Failure, "alert_state_invalid"):
+                tm.peer_alerts(self.ctx, sample)
+        atomic(
+            self.paths.state / "alert-state.json",
+            json.dumps({"down": {URI: {"since": "invalid"}}, "starts": [], "unstable": []}),
+        )
+        self.assertEqual(tm.peer_alerts(self.ctx, sample), [])
         now = dt.datetime.fromisoformat(sample["ts"])
         starts, unstable = tm.reconnects(
             {URI: ["invalid", None, (now - dt.timedelta(hours=2)).isoformat()]},
@@ -111,11 +111,12 @@ class TelemetryEdges(ConsoleFixture):
     def test_collect_degraded_health_and_repeat_dedup(self):
         tm.notify(self.ctx, "on")
         self.ps[0]["up"] = False
-        change = {"kind": "ygg-peer-down", "peer": URI, "minutes": 10, "up": 0, "total": 1}
-        with (
-            patch.object(self.ctx, "unit", return_value={"ActiveState": "inactive"}),
-            patch.object(tm, "peer_alerts", return_value=[change]),
-        ):
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=11)).isoformat()
+        atomic(
+            self.paths.state / "alert-state.json",
+            json.dumps({"down": {URI: {"since": since, "alerted": False}}}),
+        )
+        with patch.object(self.ctx, "unit", return_value={"ActiveState": "inactive"}):
             for _ in range(2):
                 with self.assertRaisesRegex(Failure, "sample_recorded"):
                     tm.collect(self.ctx)
@@ -124,7 +125,7 @@ class TelemetryEdges(ConsoleFixture):
         self.assertIn("stack_inactive", metrics[0]["errors"])
         alerts = tm.rows(self.ctx, "alerts.jsonl")
         self.assertEqual(sum(a["kind"] == "ygg-health" for a in alerts), 1)
-        self.assertEqual(sum(a["kind"] == "ygg-peer-down" for a in alerts), 2)
+        self.assertEqual(sum(a["kind"] == "ygg-peer-down" for a in alerts), 1)
         with (
             patch.object(tm, "peers", side_effect=OSError()),
             self.assertRaisesRegex(Failure, "sample_recorded"),

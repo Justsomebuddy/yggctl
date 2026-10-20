@@ -41,6 +41,26 @@ these source files alone are not a complete security boundary.
 
 ## Command effects
 
+### Peer alert persistence
+
+Peer transitions and their pending notification events share one atomic
+`alert-state.json` update. Pending records keep their original timestamp and
+stable ID. Later collections replay them into `alerts.jsonl`, comparing IDs
+and content to avoid re-appending an already queued event. Both the queue file
+and its parent directory are synced before pending records are retired.
+
+Legacy state without pending records is accepted. Malformed state/outbox data,
+conflicting IDs, more than 1000 pending events or a state larger than 1 MiB fail
+closed; existing pending events are not silently discarded. Already-pending
+events wait while notifications are disabled. Missing events lost by older
+versions cannot be reconstructed automatically.
+
+This covers producer-side queue recovery. Queue retention, consumer wakeups,
+external sender behavior and human acknowledgement are separate contracts;
+exactly-once delivery is not promised.
+
+### Other commands
+
 Peer/config transactions generally preview unless `--apply` is supplied.
 **This is not a global dry-run guarantee.** Service controls and some other
 commands have immediate effects. Network commands and atlas acquisition can
