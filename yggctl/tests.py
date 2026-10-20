@@ -1289,6 +1289,7 @@ class ConsoleTests(ConsoleFixture):
                 ("broker", "research"),
                 ("worker", "report", True),
                 ("broker_closed",),
+                ("integrity",),
                 ("sockets",),
                 ("broker", "remote"),
                 ("worker", "bench", False),
@@ -1331,7 +1332,13 @@ class ConsoleTests(ConsoleFixture):
             stack.callback(worker.conn.close)
             stack.callback(worker.reader.close)
             self.assertEqual(worker.api("getSelf")["method"], "getSelf")
-            r = worker.run(
+            remote = stack.enter_context(
+                broker.Broker(parent, "remote", uid=os.getuid(), directory=directory)
+            )
+            remote_worker = broker.WorkerContext(remote.path, paths=self.paths)
+            stack.callback(remote_worker.conn.close)
+            stack.callback(remote_worker.reader.close)
+            r = remote_worker.run(
                 [
                     str(self.paths.ctl),
                     "-json",
@@ -1341,6 +1348,16 @@ class ConsoleTests(ConsoleFixture):
                 ]
             )
             self.assertEqual(json.loads(r.stdout)["method"], "debug_remotegetpeers")
+            with self.assertRaisesRegex(Failure, "broker_call_not_allowed"):
+                worker.run(
+                    [
+                        str(self.paths.ctl),
+                        "-json",
+                        f"-endpoint=unix://{self.paths.node_sock}",
+                        "debug_remotegetpeers",
+                        "key=" + PIN,
+                    ]
+                )
             self.assertEqual(worker.read_state("metrics.jsonl", 1024), b'{"ts":"x"}\n')
             for bad in (
                 ["addPeer", "uri=tls://192.0.2.1:443"],

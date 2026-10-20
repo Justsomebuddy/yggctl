@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- Scope the broker's admin allowlist by sandbox role. The `research` and `atlas`
+  units keep local read methods but can no longer ask the parent to query other
+  nodes, which is what `PrivateNetwork=yes` on the research unit already
+  implies. Remote-node methods stay available to the `remote` role only.
+- Report what the parent actually verified instead of asserting it. The integrity
+  check now runs for every sandboxed role before the unit starts, so the claim the
+  worker relies on is true for commands that previously skipped it (`ping`,
+  `nodeinfo`, `whois`, `debug-remote`, `survey`, `traceroute`). The sockets check
+  keeps its existing scope, which matches the single command that reads it.
+- Add role-allowlist and per-role integrity regressions; no live deployment
+  behaviour is claimed by these tests.
+
 - Keep historical reports available across the collector's complete 10,000–12,000
   record retention cycle (#2). The bounded reader now accepts the pre-compaction
   window; the existing 10,000-record retained tail and other validation remain.

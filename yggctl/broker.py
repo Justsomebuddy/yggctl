@@ -1,9 +1,11 @@
 """Privilege separation for sandboxed commands.
 
 Sandboxed commands run as the unprivileged ygglab-worker user. The root parent serves
-the worker a few read-only calls over a private Unix socket: allowlisted admin API
-methods of the local node (output passed through as raw bytes, never parsed as root)
-and, for research, the metrics file. The node admin socket itself stays root-only.
+the worker a few read-only calls over a private Unix socket: admin API methods
+allowlisted for that worker's role (local reads for every role, remote-node queries only
+for the role whose unit may reach the network), with output passed through as raw bytes
+and never parsed as root, and, for research, the metrics file. The node admin socket
+itself stays root-only.
 """
 
 import base64
@@ -30,6 +32,13 @@ LOCAL = frozenset({"getself", "getpeers", "gettree", "getpaths", "getsessions"})
 REMOTE = frozenset(
     {"getnodeinfo", "debug_remotegetself", "debug_remotegetpeers", "debug_remotegettree"}
 )
+# Admin methods each sandbox role may ask the parent to run. Only the role whose
+# unit is allowed network access may reach methods that talk to other nodes.
+ADMIN_METHODS = {
+    "research": LOCAL,
+    "atlas": LOCAL,
+    "remote": LOCAL | REMOTE,
+}
 LINE_LIMIT = 64 * 1024
 REPLY_LIMIT = 24 * 1024 * 1024
 # ceil(raw / 3) * 4, plus the exact compact {"data":""}\n envelope.
@@ -46,9 +55,11 @@ def worker_uid():
 
 
 @logged
-def admin_argv(ctx, method, args):
-    """Rebuild a yggdrasilctl call from an allowlisted method and validated arguments."""
+def admin_argv(ctx, method, args, role):
+    """Rebuild a yggdrasilctl call from a method allowlisted for this sandbox role."""
     name = method.lower() if isinstance(method, str) else ""
+    if name not in ADMIN_METHODS.get(role, frozenset()):
+        raise Failure("broker_call_not_allowed")
     if name in LOCAL and args == []:
         tail = []
     elif (
@@ -127,7 +138,9 @@ class Broker:
                 timeout = request.get("timeout", 20)
                 if not isinstance(timeout, (int, float)) or not 1 <= timeout <= 60:
                     raise Failure("broker_bad_timeout")
-                argv = admin_argv(self.ctx, request.get("method"), request.get("args", []))
+                argv = admin_argv(
+                    self.ctx, request.get("method"), request.get("args", []), self.role
+                )
                 r = self.ctx.run(argv, timeout=timeout, check=False)
                 return {
                     "rc": r.returncode,
@@ -160,7 +173,11 @@ class Broker:
 
 
 class WorkerContext(Context):
-    """Worker side: no root and no console lock; the parent verified integrity and sockets."""
+    """Worker side: no root and no console lock.
+
+    The parent runs the integrity check for every sandboxed role before starting the unit,
+    and the sockets check for the commands that read it, so the worker does not repeat them.
+    """
 
     parent_verified = frozenset({"integrity", "sockets"})
 
