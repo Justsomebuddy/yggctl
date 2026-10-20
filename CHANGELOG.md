@@ -4,10 +4,10 @@
 
 ### Fixed
 
-- Scope the broker's admin allowlist by sandbox role. The `research` and `atlas`
-  units keep local read methods but can no longer ask the parent to query other
-  nodes, which is what `PrivateNetwork=yes` on the research unit already
-  implies. Remote-node methods stay available to the `remote` role only.
+- Scope the broker's admin allowlist by sandbox role. `research` keeps local
+  reads but can no longer ask the parent to query other nodes, which is what
+  `PrivateNetwork=yes` on the research unit already implies. `atlas` keeps the
+  remote methods its crawl needs, and `remote` is unchanged.
 - Report what the parent actually verified instead of asserting it. The integrity
   check now runs for every sandboxed role before the unit starts, so the claim the
   worker relies on is true for commands that previously skipped it (`ping`,

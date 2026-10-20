@@ -36,7 +36,7 @@ REMOTE = frozenset(
 # unit is allowed network access may reach methods that talk to other nodes.
 ADMIN_METHODS = {
     "research": LOCAL,
-    "atlas": LOCAL,
+    "atlas": LOCAL | REMOTE,  # atlas crawl queries other nodes by key
     "remote": LOCAL | REMOTE,
 }
 LINE_LIMIT = 64 * 1024
