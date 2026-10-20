@@ -26,3 +26,26 @@ The repository intentionally provides no installer or host policy.
   paste real configuration or decoder output into issues, logs or examples.
 
 For sensitive reports, see the root [security policy](../SECURITY.md).
+
+## Worker trust principal (source 5.7.8, issue #7)
+
+All worker roles run as the same `ygglab-worker` UID. The broker authenticates
+that shared UID using kernel `SO_PEERCRED`; it does **not** bind a client PID,
+cgroup or systemd unit to one broker instance. A separate same-UID process can
+be the first accepted client if it can reach the socket. The broker serves only
+one accepted connection, so a second connection cannot replace that client.
+
+Role allowlists restrict calls reaching a particular parent-selected broker;
+they are **not mutual security isolation between compromised workers**. Socket
+mode/ownership and the common UID do not distinguish those workers.
+`ProtectProc=invisible` hides other users' processes, not processes of the same
+UID. The role-specific filesystem/network restrictions still matter, but do not
+establish a new identity for broker authentication. Do not use this reference
+as a boundary between independently untrusted worker roles or instances.
+
+A stronger deployment needs independently separated principals and a reviewed
+per-instance endpoint/client authentication design, including descriptor sharing,
+process access and lifecycle handling. Merely comparing a request-supplied role,
+PID or token is not that design. Such strengthening is **not implemented** here.
+The offline same-UID and connection-order tests are contract witnesses, not a
+full-systemd exploit, sandbox-escape test or proof of deployment isolation.

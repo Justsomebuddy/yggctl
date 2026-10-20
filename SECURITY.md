@@ -33,3 +33,17 @@ public pin/timing parameters may survive. This does not erase previously stored
 or transmitted data. Legacy private pending with unsafe URI metadata is retained
 and refuses copying into the readable queue; review/remediation is separate from
 normal delivery and must preserve stable IDs and acknowledgement state.
+
+## Worker identity and archive resource limits
+
+Worker roles share one OS identity. Broker UID authentication does not establish
+per-worker-instance or mutually compromised-worker isolation; see the explicit
+[trust contract](docs/SECURITY.md#worker-trust-principal-source-578-issue-7).
+
+Structural backup preview accepts at most 4 MiB compressed, **8 MiB in total
+decompressed TAR bytes**, and 1 MiB per regular member. The aggregate limit is
+applied before TAR/PAX/GNU parsing and includes metadata, padding, concatenated
+gzip streams and trailing data. An over-budget input fails with
+`backup_expansion_limit`; corrupted/truncated gzip is rejected. This is an input
+byte budget, not a promised whole-process RSS/CPU limit or archive authentication.
+Previously created oversized archives may now be refused; `--apply` stays disabled.

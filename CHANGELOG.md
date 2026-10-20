@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Source 5.7.8 — observations, archive budget and trust clarification
+
+- Fix #6: unknown node observation retains tracking; do not count missing time
+  as uninterrupted downtime. Preserve alerted episodes/recovery and outbox retry.
+- Fix #8: cap the entire decompressed TAR at8MiB before metadata parsing, including
+  concatenated gzip/padding/trailing bytes. Keep4MiB compressed/1MiB member bounds.
+- Clarify #7: workers share one UID trust principal; no per-instance or mutually
+  compromised-worker isolation is implemented. Same-UID/order tests are offline only.
+- Add synthetic collect/state/queue/recovery, PAX/GNU, corruption and exact-budget
+  controls. No live/systemd exploit or runtime deployment qualification is claimed.
+
+
 ### Fixed
 
 - Protect peer telemetry and sender/display output from credential-bearing URI

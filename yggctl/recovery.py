@@ -1,10 +1,12 @@
 """Allowlisted backups; no plaintext key archive or unrestricted extraction."""
 
+import gzip
 import io
 import json
 import re
 import tarfile
 import uuid
+import zlib
 from pathlib import Path
 
 from core import (
@@ -23,6 +25,9 @@ from core import (
     event,
 )
 from checks import integrity
+
+# Entire decompressed TAR, including metadata and trailing data; not an RSS cap.
+ARCHIVE_RAW_LIMIT = 8 * 1024 * 1024
 
 
 @logged
@@ -123,13 +128,20 @@ def inspect_archive(data):
     )
     files = {}
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        # Bound the entire decompression BEFORE tarfile can allocate/interpret
+        # extended headers. GzipFile also covers concatenated gzip members and
+        # verifies the trailer; tarfile alone may stop at TAR EOF before either.
+        with gzip.GzipFile(fileobj=io.BytesIO(data), mode="rb") as compressed:
+            raw = compressed.read(ARCHIVE_RAW_LIMIT + 1)
+        if len(raw) > ARCHIVE_RAW_LIMIT:
+            raise Failure("backup_expansion_limit")
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
             for info in tar:
                 if (
                     info.name not in allowed
                     or info.name in files
                     or not info.isfile()
-                    or info.size > 1048576
+                    or not 0 <= info.size <= 1048576
                 ):
                     raise Failure("unsafe_archive_member")
                 source = tar.extractfile(info)
@@ -160,7 +172,7 @@ def inspect_archive(data):
         actual_keys = {k for k in files if k.startswith("keys/")}
         if actual_keys != ({"keys/" + n for n in KEYS} if manifest.get("keys") is True else set()):
             raise Failure("backup_key_flag_mismatch")
-    except (tarfile.TarError, KeyError, ValueError, OSError):
+    except (tarfile.TarError, KeyError, ValueError, OSError, EOFError, zlib.error):
         raise Failure("invalid_backup_archive") from None
     return files, bool(manifest.get("keys"))
 

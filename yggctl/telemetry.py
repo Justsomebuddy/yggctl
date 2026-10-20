@@ -307,6 +307,16 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
     ctx.locked(). When notifications are enabled, events and transitions are saved
     together in that one atomic file, before anything is appended to the queue."""
     state = load_peer_state(ctx)
+    # A failed query is not an observed empty peer set. Retain both tracking and
+    # pending content; collect may still replay the durable outbox independently.
+    # Legacy direct callers supplying an actual peer list remain observed.
+    if sample.get("peers_observed", True) is not True:
+        if not state.get("observation_gap"):
+            state["observation_gap"] = True
+            save_peer_state(ctx, state)
+        event("state", "peer_observation", "unknown_tracking_retained")
+        return []
+    gap = bool(state.get("observation_gap"))
     down = state.get("down", {}) if isinstance(state.get("down"), dict) else {}
     starts = state.get("starts", {}) if isinstance(state.get("starts"), dict) else {}
     unstable = state.get("unstable", {}) if isinstance(state.get("unstable"), dict) else {}
@@ -325,6 +335,12 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
             since = dt.datetime.fromisoformat(entry.get("since", sample["ts"]))
         except (TypeError, ValueError):
             since = now
+        uncertain = bool(entry.get("observation_gap")) or gap
+        if gap and not entry.get("alerted"):
+            # No uninterrupted downtime can be proved across a missing query.
+            # Keep already-alerted episodes to avoid a duplicate down event,
+            # but start a fresh confirmation interval for unalerted episodes.
+            since = now
         minutes = max(0, int((now - since).total_seconds() // 60))
         if p.get("up"):
             if entry.get("alerted"):
@@ -337,6 +353,8 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
                         "total": total,
                     }
                 )
+                if uncertain:
+                    changes[-1]["observation_gap"] = True
             continue
         alerted = bool(entry.get("alerted"))
         if not alerted and minutes >= PEER_DOWN_MINUTES:
@@ -351,6 +369,8 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
             )
             alerted = True
         tracked[p["r"]] = {"since": since.isoformat(), "alerted": alerted}
+        if alerted and uncertain:
+            tracked[p["r"]]["observation_gap"] = True
     new_starts, new_unstable = reconnects(
         starts, unstable, uptimes or {}, now, peers, up, total, changes
     )
@@ -462,6 +482,12 @@ def alert_id(alert):
 def alert_message(alert):
     default = ("Yggdrasil: тревога", "Warning", "Нода yggdrasil-lab: {kind}")
     rule, priority, text = MESSAGES.get(alert.get("kind"), default)
+    if alert.get("kind") == "ygg-peer-up" and alert.get("observation_gap"):
+        text = (
+            "Нода yggdrasil-lab: пир {peer} снова наблюдается на связи; "
+            "был разрыв наблюдений, непрерывный простой не подтверждён; "
+            "на связи {up} из {total}."
+        )
     fields = {
         k: str(v)[:120]
         for k, v in alert.items()
@@ -590,6 +616,7 @@ def collect(ctx):
             "act": "unknown",
             "up": None,
             "peers": [],
+            "peers_observed": False,
             "stack_up": None,
             "errors": [],
         }
@@ -614,6 +641,7 @@ def collect(ctx):
                         }
                         for p in ps
                     ]
+                    sample["peers_observed"] = True
                 if active != "active":
                     sample["errors"].append("stack_inactive" if stack else "node_inactive")
         except (Failure, OSError, ValueError) as exc:

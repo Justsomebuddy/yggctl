@@ -65,11 +65,12 @@ class ArchiveEdges(ConsoleFixture):
         archive.__exit__ = Mock(return_value=False)
         archive.__iter__ = Mock(return_value=iter([tarfile.TarInfo("manifest.json")]))
         archive.extractfile.return_value = None
+        data = recovery.archive(recovery.members(self.ctx))
         with (
             patch.object(recovery.tarfile, "open", return_value=archive),
             self.assertRaisesRegex(Failure, "unreadable_archive_member"),
         ):
-            recovery.inspect_archive(b"synthetic tar reader")
+            recovery.inspect_archive(data)
 
     @logged
     def test_manifest_version_and_corrupt_archive(self):

@@ -28,3 +28,18 @@ crawl retains its three remote debug reads. Command syntax/output is unchanged.
 
 These contracts do not claim that previously persisted or externally sent data
 has been erased, or that an authenticated restore implementation now exists.
+
+## Unknown observations, bounded preview and worker trust (5.7.8)
+
+| ID | Invocation/path | Expected result / failure |
+|---|---|---|
+| TELEMETRY-UNKNOWN | `collect`, unavailable node observation | Persist `peers_observed=false`, retain down/reconnect/cooldown tracking and mark an observation gap. Health remains degraded/nonzero; durable pending can still replay. |
+| ALERT-GAP | Next observed sample | Unalerted downtime confirmation restarts at that sample. An already-alerted episode is not alerted down again; recovery carries `observation_gap=true` and text does not claim uninterrupted downtime. |
+| TELEMETRY-EMPTY | Successful node observation returning no peers | `peers_observed=true`; normal observed-empty tracking/removal semantics, not an unavailable query or invented recovery. Stack-only failure does not erase a successful node observation. |
+| CLI-RESTORE-BUDGET | `restore FILE` structural preview | 4 MiB compressed / 8 MiB TOTAL decompressed TAR / 1 MiB regular member. Metadata/padding/trailing and concatenated gzip are counted before TAR parsing. Reject over-budget/corrupt input without host writes; apply remains disabled. |
+| IPC-WORKER-PRINCIPAL | Sandboxed command launch | Shared UID authentication only, no per-PID/cgroup/unit binding or mutual compromised-worker isolation; [explicit limitations](SECURITY.md#worker-trust-principal-source-578-issue-7). |
+
+Command syntax is unchanged. No history, pending payload, queue or cursor is
+silently rewritten. Gap-aware alert fields are additive; ordinary uninterrupted
+observations keep their previous alert wording. Offline fixtures do not qualify
+a host's systemd boundary or an installation.
