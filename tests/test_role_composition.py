@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import broker
 import core
 import sandbox
+import main
 from atlas import acquisition, protocol
 from atlas.store import Store
 from core import Context, Failure, logged
@@ -44,6 +45,18 @@ class SandboxRoles(unittest.TestCase):
         self.addCleanup(worker.conn.close)
         self.addCleanup(worker.reader.close)
         return worker
+
+    @logged
+    def test_consumer_method_lists_match_parent_role_policy(self):
+        self.assertLessEqual(
+            {m.lower() for m in main.API_VIEWS.values()}, broker.ADMIN_METHODS["research"]
+        )
+        self.assertLessEqual(
+            set(main.REMOTE_DEBUG.values()) | {"getnodeinfo"}, broker.ADMIN_METHODS["remote"]
+        )
+        self.assertEqual(
+            broker.ADMIN_METHODS["atlas"] - broker.LOCAL, frozenset(protocol.METHODS.values())
+        )
 
     @logged
     def test_exact_role_matrix_and_argument_validation(self):

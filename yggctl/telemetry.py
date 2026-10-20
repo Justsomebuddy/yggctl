@@ -4,12 +4,15 @@ from typing import Any
 
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import secrets
 import stat
 import statistics
 import time
+import urllib.parse
 
 from core import (
     Failure,
@@ -24,6 +27,57 @@ from core import (
     METRICS_LIMIT,
 )
 from checks import peers
+
+
+# Only typed public pin/timing options can survive a peer's display identity.
+# Unknown options (including encoded/case-varied credentials) discard ALL URI
+# metadata, not only a guessed password value. Old safe labels remain stable.
+PUBLIC_PEER_OPTIONS = {
+    "key": r"[0-9a-fA-F]{64}",
+    "maxbackoff": r"[0-9]{1,5}(?:ms|s|m|h)",
+    "priority": r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])",
+}
+
+
+@logged
+def peer_label(value):
+    """Credential-free literal endpoint; retain only proven public URI options.
+
+    This is an output boundary, NOT permission to add credential-bearing peers.
+    Existing queues/history are not rewritten: their IDs and delivery cursors
+    must stay stable. Rendering applies this boundary again for legacy alerts.
+    """
+    if not isinstance(value, str) or len(value) > 4096 or re.search(r"[\s\x00-\x1f]", value):
+        return "unknown-peer"
+    try:
+        uri = urllib.parse.urlsplit(value)
+        hostname = uri.hostname or ""
+        if "%" in hostname:
+            raise ValueError("scoped_endpoint_not_public_label")
+        host = ipaddress.ip_address(hostname)
+        port = uri.port
+    except ValueError:
+        return "unknown-peer"
+    if uri.scheme not in ("tls", "tcp", "quic", "ws", "wss") or not port:
+        return "unknown-peer"
+    authority = f"[{host}]" if host.version == 6 else str(host)
+    endpoint = f"{uri.scheme}://{authority}:{port}"
+    try:
+        options = urllib.parse.parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return endpoint
+    safe_options = len({k for k, _ in options}) == len(options) and all(
+        re.fullmatch(PUBLIC_PEER_OPTIONS.get(k, r"(?!)"), v) for k, v in options
+    )
+    if (
+        uri.username is None
+        and uri.password is None
+        and not uri.fragment
+        and uri.path in ("", "/")
+        and safe_options
+    ):
+        return value
+    return endpoint
 
 
 @logged
@@ -220,6 +274,10 @@ def flush_peer_alerts(ctx):
             return
         queued = {alert_id(row): row for row in rows(ctx, "alerts.jsonl")}
         for item in pending:
+            # Do not copy a legacy private credential into the group-readable
+            # queue, or mutate its stable-ID payload implicitly during replay.
+            if item["peer"] != peer_label(item["peer"]):
+                raise Failure("legacy_peer_pending_requires_privacy_review")
             aid = item["id"]
             if aid in queued:
                 if queued[aid] != item:
@@ -253,7 +311,12 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
     starts = state.get("starts", {}) if isinstance(state.get("starts"), dict) else {}
     unstable = state.get("unstable", {}) if isinstance(state.get("unstable"), dict) else {}
     now = dt.datetime.fromisoformat(sample["ts"])
-    peers = [p for p in sample.get("peers", []) if isinstance(p.get("r"), str) and p.get("r")]
+    peers = [
+        dict(p, r=peer_label(p["r"]))
+        for p in sample.get("peers", [])
+        if isinstance(p.get("r"), str) and p.get("r")
+    ]
+    uptimes = {peer_label(k): v for k, v in (uptimes or {}).items()}
     up, total = sum(bool(p.get("up")) for p in peers), len(peers)
     changes, tracked = [], {}
     for p in peers:
@@ -404,6 +467,8 @@ def alert_message(alert):
         for k, v in alert.items()
         if k in ("peer", "minutes", "up", "total", "kind", "count")
     }
+    if "peer" in fields:
+        fields["peer"] = peer_label(alert["peer"])[:120]
     fields["errors"] = ", ".join(str(e)[:60] for e in alert.get("errors", [])[:5]) or "неизвестно"
     try:
         rule = rule.format(**fields)
@@ -536,12 +601,12 @@ def collect(ctx):
                 if stack:
                     sample["stack_up"] = sum(p["up"] for p in ps)
                 else:
-                    uptimes = {p.get("remote"): p.get("uptime") for p in ps}
+                    uptimes = {peer_label(p.get("remote")): p.get("uptime") for p in ps}
                     sample["act"] = active
                     sample["up"] = sum(p["up"] for p in ps)
                     sample["peers"] = [
                         {
-                            "r": p.get("remote", ""),
+                            "r": peer_label(p.get("remote")),
                             "up": p["up"],
                             "rtt": p.get("latency", 0) / 1e6,
                             "rx": p.get("bytes_recvd", 0),
@@ -626,7 +691,7 @@ def stats(ctx, hours=24, graph=False):
         latency = [p["rtt"] for p in known if p["up"] and p.get("rtt", 0) > 0]
         median = statistics.median(latency) if latency else "unknown"
         print(
-            f"{name}: observed_avail={100 * up / len(known):.1f}% present={len(known)} "
+            f"{peer_label(name)}: observed_avail={100 * up / len(known):.1f}% present={len(known)} "
             f"absent={len(matches) - len(known)} median_ms={median}"
         )
         if graph:

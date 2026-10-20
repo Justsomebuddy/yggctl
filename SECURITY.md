@@ -20,3 +20,16 @@ Replace sensitive inputs with synthetic examples before posting. If GitHub
 offers a private report option in the repository's Security tab, it may also be
 used; this policy does not claim that option is enabled. No separate external
 reporting channel or response-time guarantee is advertised.
+
+## Backup origin and peer URI output
+
+`restore` currently supports structural preview only. A matching `.sha256` and
+internal manifest are corruption checks, **not origin authentication**. `--apply`
+is disabled until independent archive authentication and separate integrity
+acceptance are reviewed; encrypted archives alone do not solve this trust issue.
+
+New telemetry and peer-alert output remove unapproved URI metadata. Only typed
+public pin/timing parameters may survive. This does not erase previously stored
+or transmitted data. Legacy private pending with unsafe URI metadata is retained
+and refuses copying into the readable queue; review/remediation is separate from
+normal delivery and must preserve stable IDs and acknowledgement state.

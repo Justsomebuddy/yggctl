@@ -16,3 +16,15 @@ systemd provisioning, privilege isolation or overlay connectivity.
 All `atlas`, `research` and remote commands fail before worker launch when the
 parent integrity check fails. Research broker requests stay local-only; Atlas
 crawl retains its three remote debug reads. Command syntax/output is unchanged.
+
+## Privacy and restore boundary (5.7.7)
+
+| ID | Invocation/path | Expected result / failure |
+|---|---|---|
+| CLI-RESTORE-PREVIEW | `restore FILE` | Structural checks only, explicitly **NOT AUTHENTICATED**. Archive/sidecar/internal hashes do not prove origin; no config, integrity manifest, gate or service changes. |
+| CLI-RESTORE-APPLY | `restore FILE --apply` | Explicit failure before archive reads, decryption or lock. Disabled until independent authentication AND integrity acceptance are designed/reviewed; encryption is not authenticity. |
+| TELEMETRY-PEER | collect / peer alert / stats | Literal endpoint; only typed public pin/timing query options can remain. Other query data, userinfo, path and fragments are removed; invalid endpoints become `unknown-peer`. |
+| ALERT-LEGACY | Existing queue/pending | Rendering protects raw legacy peer fields; histories/IDs/cursors are not rewritten. Private secret-bearing pending refuses copying into the group-readable queue and requires separate review. |
+
+These contracts do not claim that previously persisted or externally sent data
+has been erased, or that an authenticated restore implementation now exists.

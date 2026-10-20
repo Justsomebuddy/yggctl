@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- Protect peer telemetry and sender/display output from credential-bearing URI
+  metadata (#5). Keep only literal endpoints or established typed public pin/
+  timing labels. Legacy queue rendering is protected without rewriting history
+  or delivery IDs; unsafe private pending refuses copying into the readable queue.
+- Disable unauthenticated `restore --apply` before reads/decryption/locking. The
+  read-only structural preview now says NOT AUTHENTICATED, not VERIFIED. A sidecar
+  plus internal member hashes proves consistency, not archive origin; no automatic
+  integrity promotion or restart remains on this path. Independent authentication
+  and separate integrity acceptance are still required before re-enabling apply.
+- Add actual synthetic collect/persistence/sender, self-consistent forged archive
+  and consumer-derived role regressions. No live-node or historical-data mutation.
+
 - Scope broker admin methods by the parent-selected role (#5, #4): research
   stays local-only, Atlas retains exactly its three remote debug reads, and
   remote commands retain the existing read-only method set. Requests cannot

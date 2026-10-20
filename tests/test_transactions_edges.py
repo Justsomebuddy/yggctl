@@ -212,7 +212,7 @@ class RecoveryEdges(ConsoleFixture):
         return path
 
     @logged
-    def test_restore_review_boundaries_and_apply(self):
+    def test_restore_review_boundaries_and_encrypted_preview(self):
         original = rc.members(self.ctx)
         for field, data, label in (
             ("config/mode", b"tunnel\n", "restore_underlay_change"),
@@ -230,11 +230,7 @@ class RecoveryEdges(ConsoleFixture):
         with self.assertRaisesRegex(Failure, "archive_digest_mismatch"):
             rc.restore(self.ctx, path)
         path = self.save_archive(original, suffix=".gpg")
-        with (
-            patch.object(self.ctx, "run", wraps=self.ctx.run) as run,
-            patch.object(rc, "transaction") as transaction,
-            patch.object(rc, "restart_pair") as restart,
-        ):
+        with patch.object(self.ctx, "run", wraps=self.ctx.run) as run:
             # Return plaintext archive only for the synthetic decrypt call.
             previous = self.ctx.runner
 
@@ -246,12 +242,7 @@ class RecoveryEdges(ConsoleFixture):
                 return result
 
             self.ctx.runner = decrypt
-            rc.restore(self.ctx, path, True)
-            args = transaction.call_args.args
-            self.assertEqual(len(args[1]), 5)
-            args[2]()
-            args[3]()
-            self.assertEqual(restart.call_count, 2)
+            rc.restore(self.ctx, path)
             self.assertTrue(any(c.args[0][0] == "/usr/bin/gpg" for c in run.call_args_list))
 
     @logged

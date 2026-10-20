@@ -51,7 +51,7 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
               add-peer принимает только IPv4-литерал и обязательный ?key=HEX64; меняет оба инстанса.
               mode direct|tunnel [--apply], recover-transaction [--apply].
               Без --apply изменение только показывается.
-Восстановление: snapshot, diff [файл], backup [--full --recipient ОТПЕЧАТОК], restore ФАЙЛ [--apply], doctor
+Восстановление: snapshot, diff [файл], backup [--full --recipient ОТПЕЧАТОК], restore ФАЙЛ (только просмотр; --apply отключён), doctor
 Исследования: research capture|map [ID]|diff [ранний ID]|report [1..72 часа] — снимки своей ноды
               и их история; размер всей сети неизвестен.
 Атлас:        atlas catalogue|new|crawl [1..120 минут]|status|report — весь публичный каталог пиров и

@@ -1498,7 +1498,7 @@ class ConsoleTests(ConsoleFixture):
             self.assertNotEqual(first["rule"][:160], second["rule"][:160])
             lengthy = telemetry.alert_message(dict(alert, peer=long_peer))["rule"]
             self.assertLessEqual(len(lengthy), 160)
-            self.assertIn(long_peer[:120], lengthy)
+            self.assertIn("unknown-peer", lengthy)
             bare = {k: v for k, v in alert.items() if k != "peer"}
             self.assertEqual(telemetry.alert_message(bare)["rule"], f"Yggdrasil: пир {tail}")
         self.assertEqual(

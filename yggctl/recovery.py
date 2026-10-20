@@ -23,7 +23,6 @@ from core import (
     event,
 )
 from checks import integrity
-from management import transaction, restart_pair
 
 
 @logged
@@ -169,6 +168,11 @@ def inspect_archive(data):
 @logged
 def restore(ctx, path, apply=False):
     ctx.root()
+    # A co-supplied sidecar and self-hashed manifest detect corruption, not origin.
+    # Refuse before reading/decrypting/locking: no config, manifest or service can
+    # be changed until independent authentication and acceptance are designed.
+    if apply:
+        raise Failure("restore_apply_requires_independent_authentication_review")
     with ctx.locked():
         # Caller-selected archive is data only. No extraction, links, arbitrary paths or code execution.
         path = Path(path)
@@ -187,7 +191,6 @@ def restore(ctx, path, apply=False):
         for n in (NODE, STACK, TIMER, "ygg-metrics.service"):
             if files["units/" + n] != read_regular(ctx.p.units / n):
                 raise Failure("restore_unit_change_requires_separate_review")
-        configs = []
         for name in ("yggdrasil-lab.conf", "yggstack.conf"):
             decoded = json.loads(ctx.run([ctx.p.decoder], input=updates[ctx.p.etc / name]).stdout)
             current = ctx.config(name)
@@ -195,19 +198,12 @@ def restore(ctx, path, apply=False):
                 decoded.get(k) != current.get(k) for k in ("AdminListen", "PrivateKeyPath")
             ):
                 raise Failure("restore_unsafe_config")
-            configs.append(decoded)
-        # Do not trust backup gate executable syntax: regenerate only the peer IP set.
-        from management import gate_bytes
-
-        updates[ctx.p.etc / "gate.nft"] = gate_bytes(configs, "ygglab")
-        updates[ctx.p.etc / "gate-yggstack.nft"] = gate_bytes(configs, "yggstack-gate")
         print(
-            "VERIFIED key-free archive; live keys, units, mode and accepted firewall policy preserved"
+            "STRUCTURAL CHECK ONLY — NOT AUTHENTICATED; archive/sidecar hashes do not prove origin"
         )
-        if apply:
-            transaction(ctx, updates, lambda: restart_pair(ctx), lambda: restart_pair(ctx))
-        else:
-            print("PREVIEW only; --apply restarts both services after config restoration")
+        print(
+            "PREVIEW only; --apply disabled pending independent authentication and integrity acceptance review"
+        )
 
 
 @logged
