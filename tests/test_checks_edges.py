@@ -235,6 +235,21 @@ class CheckEdges(ConsoleFixture):
                     checks.timer_gate(self.ctx)
 
     @logged
+    def test_peer_counters_must_be_finite(self):
+        self.ps[0]["key"] = "a" * 64
+        base = dict(self.ps[0])
+        for field in ("latency", "bytes_recvd", "bytes_sent"):
+            for bad in (float("nan"), float("inf"), float("-inf"), -1, "1", True):
+                self.ps[:] = [dict(base, **{field: bad})]
+                with (
+                    self.subTest(field=field, value=bad),
+                    self.assertRaisesRegex(Failure, "invalid_peer_counter"),
+                ):
+                    checks.peers(self.ctx)
+        self.ps[:] = [dict(base, latency=0.0)]
+        self.assertEqual(len(checks.peers(self.ctx)), 1)
+
+    @logged
     def test_composite_check_runs_every_gate_even_on_failure(self):
         gates = (
             "guard",

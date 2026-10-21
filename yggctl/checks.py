@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import ipaddress
+import math
 import json
 import re
 import stat
@@ -34,7 +35,10 @@ def peers(ctx, stack=False):
             raise Failure("invalid_peer_remote")
         for field in ("latency", "bytes_recvd", "bytes_sent"):
             value = p.get(field, 0)
-            if type(value) not in (int, float) or value < 0:
+            # NaN passes `value < 0`, is written back by json.dumps as a bare NaN token
+            # and breaks every non-Python reader of metrics.jsonl (research already
+            # rejects non-finite latency).
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                 raise Failure("invalid_peer_counter")
     return rows
 
