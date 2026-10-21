@@ -1,7 +1,5 @@
 """Bounded, serialized samples and truthful missing-data reporting."""
 
-from typing import Any
-
 import datetime as dt
 import hashlib
 import ipaddress
@@ -13,6 +11,7 @@ import stat
 import statistics
 import time
 import urllib.parse
+from typing import Any
 
 from core import (
     Failure,
@@ -27,6 +26,7 @@ from core import (
     METRICS_LIMIT,
 )
 from checks import peers
+import simplex_sender
 
 
 # Only typed public pin/timing options can survive a peer's display identity.
@@ -456,7 +456,8 @@ def reconnects(starts, unstable, uptimes, now, peers, up, total, changes):
 
 
 SENDER = "/usr/local/bin/simplex-alert.sh"
-# The sender suppresses repeats within 300 s by priority and rule, so a peer alert names its peer in the rule.
+# Legacy shared bridge path retained only to identify it in compatibility diagnostics;
+# forward() never invokes it. Native Ygg handoff has no priority/rule suppression.
 MESSAGES = {
     "ygg-peer-down": (
         "Yggdrasil: пир {peer} недоступен",
@@ -538,11 +539,11 @@ FORWARD_RESERVE = 5  # normal local checkpoint/exit time, not a guarantee under 
 
 @logged
 def forward(ctx):
-    """Per-success durable handoff, NOT exactly-once delivery or a human ACK.
+    """Checkpoint native-recorded receipts only; ambiguity remains pending.
 
-    SIGTERM/crash between sender success and fsync can still cause a duplicate.
-    Sender rc0 may mean rate suppression OR a handled native command error.
-    It proves neither command acceptance, transport delivery nor a human ACK.
+    The separate durable attempt journal prevents blind resend after a crash or
+    timeout. Neither local recording nor its receipt proves delivery/human ACK.
+    Existing legacy cursor entries are preserved, not retroactively verified.
     """
     start = time.monotonic()
     deadline = start + FORWARD_BUDGET
@@ -584,14 +585,9 @@ def forward(ctx):
                 break
             processed += 1
             try:
-                result = ctx.run(
-                    [SENDER],
-                    input=json.dumps(alert_message(alert), ensure_ascii=False).encode(),
-                    timeout=min(30, remaining),
-                    check=False,
-                )
-                success = result.returncode == 0
-            except Failure:
+                simplex_sender.handoff(ctx, aid, alert_message(alert), timeout=min(20, remaining))
+                success = True
+            except (Failure, OSError, ValueError, KeyError, simplex_sender.sqlite3.Error):
                 success = False
             if success:
                 done.add(aid)
@@ -600,10 +596,10 @@ def forward(ctx):
                 atomic(
                     ctx.p.state / "alerts-forwarded.json", json.dumps({"sent": kept}) + "\n", 0o600
                 )
-                event("state", "alert_forward", "sender_rc0_checkpointed")
+                event("state", "alert_forward", "native_recorded_checkpointed")
             else:
                 failures += 1
-                event("error", "alert_forward", "sender_failed_pending")
+                event("error", "alert_forward", "native_unconfirmed_pending")
             elapsed = time.monotonic() - start
             print(
                 f"[{processed}/{len(pending)}] sender handoff; processed={processed} errors={failures} "
@@ -615,7 +611,7 @@ def forward(ctx):
         left = sum(aid not in done for aid in set(ids))
         print(
             f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
-            f"elapsed={time.monotonic() - start:.2f}s; sender rc0 is NOT command acceptance/delivery/human ACK"
+            f"elapsed={time.monotonic() - start:.2f}s; native local recording is NOT delivery/human ACK"
         )
         if failures:
             raise Failure(f"alert_forward_failed:count={failures}")

@@ -9,6 +9,7 @@ It is run as a source script; this repository is not a pip distribution.
 | `checks.py` | Deployment-specific health and integrity checks |
 | `management.py` | Service controls and peer/config transactions |
 | `telemetry.py` | Local metrics, reports and alert handoff |
+| `simplex_sender.py` | Ygg-only durable native-recorded handoff, fail-closed ambiguity |
 | `recovery.py` | Deployment-specific backup and recovery operations |
 | `sandbox.py`, `broker.py` | Worker launch, mandatory integrity gate and role-scoped admin reads |
 | `research/`, `atlas/` | Bounded observed-network collection and analysis |
@@ -26,7 +27,7 @@ includes no acquired observations or operating node identities.
 | Runtime/state | Dedicated `/run/yggdrasil-lab` and `/var/lib/yggdrasil-lab` trees |
 | Isolation | systemd/cgroup-v2, three role principals, broker under `/run/yggctl-broker`, Linux `/proc` |
 | Policy | Independently reviewed firewall/nftables baseline; some checks assume Mullvad |
-| Monitoring | Existing metrics timer/service and optional external SimpleX sender |
+| Monitoring | Existing metrics timer/service and optional reviewed native SimpleX integration |
 | Integrity | A pre-provisioned manifest that also covers files outside this repository |
 
 These integrations are not installed by this repository. An externally
@@ -70,7 +71,8 @@ initiate traffic. Several legacy operations, including `purge`, `rotate-key`,
 Do not run operational commands against a production host to test this tree.
 Any integration or deployment requires a separate plan and rollback.
 
-## Source 5.8.0 worker integration
+## Source 5.9.0 integration changes
 
-Reviewed separate-role [provisioning/migration](WORKER_IDENTITY.md) is required;
-source publication is not installation.
+Worker identities require the [separate-role migration](WORKER_IDENTITY.md);
+alert forwarding requires [private native-handoff configuration and shared-lock
+qualification](NATIVE_HANDOFF.md). Neither is an automatic install step.

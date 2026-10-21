@@ -1,3 +1,9 @@
+# Historical shared bridge — through source 5.7.9
+
+**Source 5.9.0 supersedes this for Ygg forwarding:** see [native handoff](NATIVE_HANDOFF.md).
+The shared bridge itself remains unchanged for its other consumers. The audit
+below describes the old implementation, not the new adapter.
+
 # Actual SimpleX bridge contract (issue #9)
 
 This describes the existing deployment bridge, not a new sender backend or an

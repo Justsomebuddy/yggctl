@@ -1,5 +1,7 @@
 """Telemetry torn writes, corrupt state, alert deduplication and unknown health."""
 
+from test_support import process_handoff_fixture
+
 from typing import Any
 
 import contextlib
@@ -94,6 +96,7 @@ class TelemetryEdges(ConsoleFixture):
         self.assertEqual((starts, unstable), ({}, {}))
 
     @logged
+    @patch("simplex_sender.handoff", new=process_handoff_fixture)
     def test_forward_duplicate_ids_sent_once(self):
         self.prepare_forward_pending(1)
         data = (self.paths.state / "alerts.jsonl").read_bytes()

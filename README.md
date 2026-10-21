@@ -1,6 +1,6 @@
-> Source **5.8.0**: separate worker-role principals and kernel expected-unit
-> admission (#7). The earlier [SimpleX bridge](docs/SIMPLEX_BRIDGE.md) remains
-> best-effort: process rc0 is not command acceptance or delivery (#9).
+> Source **5.7.9**: history byte-cap recovery and failure-independent alert
+> processing (#10); [actual SimpleX bridge contract](docs/SIMPLEX_BRIDGE.md) (#9).
+> The bridge remains best-effort: process rc0 is not command acceptance or delivery.
 
 # yggctl
 
@@ -16,11 +16,13 @@ tool. It complements rather than replaces upstream `yggdrasilctl`.
 > host can stop services or alter configuration. No fresh-machine installation
 > or production-readiness guarantee is provided.
 
-## Source 5.8.0 integration notice
+## Source 5.9.0 integration notice
 
 Separate worker principals and expected-unit admission require reviewed
-[provisioning/migration](docs/WORKER_IDENTITY.md). Same-role stores remain shared.
-This reference-source change never updates an installed console.
+[provisioning/migration](docs/WORKER_IDENTITY.md). Alert forwarding now requires
+[Ygg-only native-handoff configuration](docs/NATIVE_HANDOFF.md): ambiguous attempts
+remain pending without blind retry; local recording is not delivery/human ACK.
+This source change never updates an installed console or shared alert bridge.
 
 ## Scope
 
@@ -54,9 +56,9 @@ cd ..
 The suites use temporary directories, mocked system commands and local Unix
 sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
-The stdlib suites contain 113 console + 23 research + 33 atlas tests.
+The stdlib suites contain 106 console + 23 research + 33 atlas tests.
 With QA dependencies, Pytest also runs supplemental adversarial/property cases:
-310 unique tests, with measured 100% production statement and branch coverage
+323 unique tests, with measured 100% production statement and branch coverage
 on Python 3.14.8. This does not qualify a live deployment or prove correctness.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).

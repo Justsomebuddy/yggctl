@@ -1,5 +1,7 @@
 """Synthetic persistence/sender privacy and untrusted archive apply boundaries."""
 
+from test_support import process_handoff_fixture
+
 import contextlib
 import datetime as dt
 import io
@@ -74,6 +76,7 @@ class PrivacyRestore(ConsoleFixture):
                 self.assertEqual(tm.peer_label(value), "unknown-peer")
 
     @logged
+    @patch("simplex_sender.handoff", new=process_handoff_fixture)
     def test_actual_collect_persistence_alert_transitions_and_sender_no_uri_secrets(self):
         now = dt.datetime(2026, 10, 20, 10, tzinfo=dt.timezone.utc)
         raw = ENDPOINT + "?password=" + MARKER + "&key=" + "1" * 64
