@@ -53,7 +53,13 @@ class MetricLimits(unittest.TestCase):
     def worker(self):
         directory = tempfile.TemporaryDirectory(prefix="yb-")
         self.addCleanup(directory.cleanup)
-        server = broker.Broker(self.ctx, "research", os.geteuid(), Path(directory.name))
+        server = broker.Broker(
+            self.ctx,
+            "research",
+            os.geteuid(),
+            Path(directory.name),
+            expected_cgroup=broker.process_cgroup(os.getpid()),
+        )
         self.addCleanup(server.close)
         worker = broker.WorkerContext(server.path, self.fixture.paths)
         worker.conn.settimeout(10)

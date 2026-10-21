@@ -249,11 +249,17 @@ class ObservationBudget(unittest.TestCase):
                 rc.inspect_archive(data)
 
     @logged
-    def test_shared_uid_is_one_principal_not_per_instance_authentication(self):
+    def test_same_unit_process_is_allowed_but_role_principals_are_distinct(self):
         # A genuinely separate Python process, same unprivileged UID. This is
         # deliberately NOT a proof about systemd confinement or an exploit.
         with tempfile.TemporaryDirectory(prefix="yu-") as directory:
-            with broker.Broker(self.ctx, "research", os.getuid(), Path(directory)) as served:
+            with broker.Broker(
+                self.ctx,
+                "research",
+                os.getuid(),
+                Path(directory),
+                expected_cgroup=broker.process_cgroup(os.getpid()),
+            ) as served:
                 code = (
                     "import socket,sys;s=socket.socket(socket.AF_UNIX);s.settimeout(3);"
                     's.connect(sys.argv[1]);s.sendall(b\'{"call":"metrics"}\\n\');'
@@ -266,13 +272,20 @@ class ObservationBudget(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0)
-        self.assertIn("User=" + broker.WORKER, sandbox.COMMON)
+        self.assertEqual(len(set(broker.USERS.values())), 3)
+        self.assertIn("User=" + broker.USERS["research"], sandbox.properties("research"))
         self.assertIn("ProtectProc=invisible", sandbox.COMMON)
 
     @logged
     def test_second_connection_cannot_replace_already_accepted_worker(self):
         with tempfile.TemporaryDirectory(prefix="yu-") as directory:
-            with broker.Broker(self.ctx, "research", os.getuid(), Path(directory)) as served:
+            with broker.Broker(
+                self.ctx,
+                "research",
+                os.getuid(),
+                Path(directory),
+                expected_cgroup=broker.process_cgroup(os.getpid()),
+            ) as served:
                 with (
                     socket.socket(socket.AF_UNIX) as first,
                     socket.socket(socket.AF_UNIX) as second,

@@ -64,7 +64,7 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
               отключены до отдельного ревью. Установка — scripts/deployment/deploy.sh.
 Без sudo:     help, version, update-check, stats, graph.
 Самотест:     selftest и selftest offline требуют sudo; stats/graph — читаемый файл метрик.
-Песочница:    research, atlas и команды сети Yggdrasil работают от пользователя ygglab-worker без
+Песочница:    research, atlas и команды сети Yggdrasil работают от отдельных пользователей ролей без
               root и без ключей; у research нет сети, у сетевых команд — только localhost.
 Тревоги:      пир недоступен 10+ минут, нестабилен (3+ разрыва за час) или вернулся, сбой ноды —
               в SimpleX, пока notify включён.

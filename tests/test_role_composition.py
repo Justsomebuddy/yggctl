@@ -38,7 +38,13 @@ class SandboxRoles(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="yr-")
         self.addCleanup(directory.cleanup)
         parent = Context(self.paths, runner, require_root=False)
-        server = broker.Broker(parent, role, uid=os.getuid(), directory=Path(directory.name))
+        server = broker.Broker(
+            parent,
+            role,
+            uid=os.getuid(),
+            directory=Path(directory.name),
+            expected_cgroup=broker.process_cgroup(os.getpid()),
+        )
         self.addCleanup(server.close)
         worker = broker.WorkerContext(server.path, paths=self.paths)
         worker.conn.settimeout(5)
