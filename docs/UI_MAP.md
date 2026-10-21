@@ -43,3 +43,15 @@ Command syntax is unchanged. No history, pending payload, queue or cursor is
 silently rewritten. Gap-aware alert fields are additive; ordinary uninterrupted
 observations keep their previous alert wording. Offline fixtures do not qualify
 a host's systemd boundary or an installation.
+
+## History write and sender boundary (5.7.9; issues #9/#10)
+
+| ID | Invocation/path | Expected result / failure |
+|---|---|---|
+| TELEMETRY-WRITE-BOUND | `collect`, append reaching 32 MiB before count rotation | Atomically retain the newest complete suffix including the new record, within both byte/count limits. Reject an oversized individual record or corrupt/over-bound existing file; never silently discard corruption. Retention can be shorter than 10,000 records. |
+| TELEMETRY-WRITE-ERROR | History append fails while state/queue remain writable | Continue durable pending replay and observed/unknown peer-state processing; report nonzero `metric_write_failed_alerts_processed` after successful alert processing. No fabricated history or outage across unknown observations. Other storage failures can still prevent state/queue commits. |
+| ALERT-SENDER-RESULT | `alerts-forward` | Process rc0 checkpoint only; final output explicitly says NOT command acceptance/delivery/human ACK. Existing best-effort suppression and duplicate/loss windows remain; no new backend/profile migration. |
+
+Tests use bounded synthetic histories and sender outcomes, not live notification
+or multi-day evidence. See the actual bridge algorithm and limitations in
+`SIMPLEX_BRIDGE.md` (public) / doc35 (private). No new command or network policy.

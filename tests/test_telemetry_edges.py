@@ -28,10 +28,7 @@ class TelemetryEdges(ConsoleFixture):
             self.assertRaisesRegex(Failure, "corrupt_metric_record"),
         ):
             tm.rows(self.ctx)
-        for mode, size, label in (
-            (stat.S_IFDIR | 0o600, 0, "metric_file_not_regular"),
-            (stat.S_IFREG | 0o600, 32 * 1024 * 1024, "metric_file_size_limit"),
-        ):
+        for mode, size, label in ((stat.S_IFDIR | 0o600, 0, "metric_file_not_regular"),):
             with (
                 patch.object(self.ctx, "locked", return_value=contextlib.nullcontext()),
                 patch.object(

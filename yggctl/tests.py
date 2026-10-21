@@ -1925,9 +1925,8 @@ telemetry.forward(Context(Paths(state=Path(sys.argv[2])), sender, require_root=F
             return info
 
         with patch("telemetry.os.fstat", side_effect=oversize):
-            with self.assertRaisesRegex(Failure, "metric_file_size_limit"):
-                telemetry.append(self.ctx, "error.jsonl", {})
-        self.assertEqual((self.paths.state / "error.jsonl").read_bytes(), b"")
+            telemetry.append(self.ctx, "error.jsonl", {})
+        self.assertEqual((self.paths.state / "error.jsonl").read_bytes(), b"{}\n")
 
     @logged
     def test_forward_budget_includes_lock_wait(self):

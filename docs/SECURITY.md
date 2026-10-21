@@ -49,3 +49,11 @@ process access and lifecycle handling. Merely comparing a request-supplied role,
 PID or token is not that design. Such strengthening is **not implemented** here.
 The offline same-UID and connection-order tests are contract witnesses, not a
 full-systemd exploit, sandbox-escape test or proof of deployment isolation.
+
+## SimpleX process success is not message acceptance (5.7.9; #9)
+
+The inspected external bridge discards one-shot CLI stdout and checks only
+process status. A handled command error can be checkpointed; acceptance followed
+by timeout can be retried and duplicated. Rate suppression is not stable native
+idempotency. [Full credential-free algorithm, version/mode and limits](SIMPLEX_BRIDGE.md).
+No new native sender, transport guarantee or human-ACK observation is claimed.

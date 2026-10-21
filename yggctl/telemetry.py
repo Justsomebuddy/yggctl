@@ -118,12 +118,34 @@ def metric_records(fd, size):
 
 
 @logged
+def metric_compact(ctx, name, row, keep, appended=False):
+    """Newest complete records, bounded by BOTH count and bytes, including new row."""
+    line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+    if len(line) > METRICS_LIMIT:
+        raise Failure("metric_record_size_limit")
+    values = rows(ctx, name)
+    if appended:
+        values = values[:-1]
+    retained, size = [line], len(line)
+    for previous in reversed(values[-(keep - 1) :] if keep > 1 else []):
+        encoded = (json.dumps(previous, separators=(",", ":")) + "\n").encode()
+        if size + len(encoded) > METRICS_LIMIT:
+            break
+        retained.append(encoded)
+        size += len(encoded)
+    atomic(ctx.p.state / name, b"".join(reversed(retained)), 0o640)
+    event("state", "metric_append", "compacted_by_byte_or_record_bound")
+
+
+@logged
 def append(ctx, name, row, keep=METRIC_RETENTION):
-    """Compact at >120% of `keep` RECORDS, independent of the last row's size."""
+    """Retain a newest suffix within 32 MiB; compact count at >120% of keep."""
     if type(keep) is not int or not 1 <= keep <= METRIC_RETENTION:
         raise Failure("invalid_metric_retention")
     path = ctx.p.state / name
     line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+    if len(line) > METRICS_LIMIT:
+        raise Failure("metric_record_size_limit")
     with ctx.locked():
         fd = os.open(
             path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o640
@@ -133,7 +155,9 @@ def append(ctx, name, row, keep=METRIC_RETENTION):
             if not stat.S_ISREG(info.st_mode):
                 raise Failure("metric_file_not_regular")
             if info.st_size + len(line) > METRICS_LIMIT:
-                raise Failure("metric_file_size_limit")
+                metric_compact(ctx, name, row, keep)
+                os.chown(path, -1, ctx.p.state.stat().st_gid)
+                return
             if info.st_size and os.pread(fd, 1, info.st_size - 1) != b"\n":
                 tail = os.pread(fd, min(info.st_size, 1 << 20), max(0, info.st_size - (1 << 20)))
                 cut = tail.rfind(b"\n")
@@ -153,12 +177,7 @@ def append(ctx, name, row, keep=METRIC_RETENTION):
             os.close(fd)
         os.chown(path, -1, ctx.p.state.stat().st_gid)
         if count > keep * 6 // 5:
-            values = rows(ctx, name)
-            atomic(
-                path,
-                "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in values[-keep:]),
-                0o640,
-            )
+            metric_compact(ctx, name, row, keep, appended=True)
             os.chown(path, -1, ctx.p.state.stat().st_gid)
             event("state", "metric_append", "compacted_by_record_count")
 
@@ -522,7 +541,8 @@ def forward(ctx):
     """Per-success durable handoff, NOT exactly-once delivery or a human ACK.
 
     SIGTERM/crash between sender success and fsync can still cause a duplicate.
-    Existing sender rc0 may mean its rate-limit suppression, not actual delivery.
+    Sender rc0 may mean rate suppression OR a handled native command error.
+    It proves neither command acceptance, transport delivery nor a human ACK.
     """
     start = time.monotonic()
     deadline = start + FORWARD_BUDGET
@@ -595,7 +615,7 @@ def forward(ctx):
         left = sum(aid not in done for aid in set(ids))
         print(
             f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
-            f"elapsed={time.monotonic() - start:.2f}s; sender rc0 is NOT delivery/human ACK"
+            f"elapsed={time.monotonic() - start:.2f}s; sender rc0 is NOT command acceptance/delivery/human ACK"
         )
         if failures:
             raise Failure(f"alert_forward_failed:count={failures}")
@@ -648,7 +668,13 @@ def collect(ctx):
             sample["errors"].append(str(exc) if isinstance(exc, Failure) else "metric_unavailable")
         if sample["up"] == 0 or sample["stack_up"] == 0:
             sample["errors"].append("no_up_peers")
-        append(ctx, "metrics.jsonl", sample)
+        metric_failed = False
+        try:
+            append(ctx, "metrics.jsonl", sample)
+        except (Failure, OSError):
+            metric_failed = True
+            sample["errors"].append("metric_write_failed")
+            event("error", "collect", "history_write_failed_alerts_continue")
         enabled = notify_state(ctx) == "on"
         if enabled:
             # Drain first: a full recoverable outbox must not block its own retry.
@@ -672,6 +698,8 @@ def collect(ctx):
                         1000,
                     )
                     event("alert", "collect", "health_degraded")
+        if metric_failed:
+            raise Failure("metric_write_failed_alerts_processed")
         if sample["errors"]:
             raise Failure("sample_recorded_with_unknown_or_degraded_health")
         print("[1/1] sample recorded; processed=2 instances errors=0 remaining=0")

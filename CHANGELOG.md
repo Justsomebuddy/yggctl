@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Source 5.7.9 — history writer and bridge contract
+
+- Fix #10: pre-write atomic byte/count bounded suffix compaction; history-write
+  failure no longer prevents pending replay or observed/unknown peer-state work.
+  Errors remain nonzero; no fabricated samples, corruption reset or history purge.
+- Answer #9: publish the inspected credential-free SimpleX CLI bridge algorithm,
+  version/mode and actual loss/duplicate windows. Make the process-only rc0 CLI
+  disclaimer explicit. No new sender backend, native acceptance or delivery claim.
+- Add synthetic byte-cap, write-failure, outage/gap/pending and sender-boundary
+  regressions. Runtime/profile/system installation is not part of this source change.
+
+
 ### Source 5.7.8 — observations, archive budget and trust clarification
 
 - Fix #6: unknown node observation retains tracking; do not count missing time

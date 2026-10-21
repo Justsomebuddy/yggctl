@@ -1,3 +1,7 @@
+> Source **5.7.9**: history byte-cap recovery and failure-independent alert
+> processing (#10); [actual SimpleX bridge contract](docs/SIMPLEX_BRIDGE.md) (#9).
+> The bridge remains best-effort: process rc0 is not command acceptance or delivery.
+
 # yggctl
 
 An experimental operator console for a specific Linux/systemd deployment of
