@@ -19,7 +19,7 @@ from core import (
     timestamp,
     event,
 )
-from checks import integrity, peers, underlay
+from checks import identified, integrity, peers, underlay
 
 
 @logged
@@ -111,7 +111,7 @@ def wait_peers(ctx, desired=None, seconds=25, absent=False):
         valid = True
         for stack in (False, True):
             rows = peers(ctx, stack)
-            up = {endpoint(p.get("remote", "")) for p in rows if p["up"]}
+            up = {endpoint(p.get("remote", "")) for p in rows if identified(p)}
             configured = {endpoint(p.get("remote", "")) for p in rows}
             valid &= len(up) >= 2 and (
                 desired is None or (desired not in configured if absent else desired in up)
@@ -257,7 +257,7 @@ def service(ctx, command):
         if action in ("start", "restart"):
             # Node commands may start stack via dependency; require the requested unit.
             deadline = time.monotonic() + 25
-            while sum(p["up"] for p in peers(ctx, stack)) < 2:
+            while sum(identified(p) for p in peers(ctx, stack)) < 2:
                 if time.monotonic() >= deadline:
                     raise Failure("service_peer_timeout")
                 time.sleep(2)

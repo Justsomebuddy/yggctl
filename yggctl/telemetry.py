@@ -25,7 +25,7 @@ from core import (
     METRIC_RETENTION,
     METRICS_LIMIT,
 )
-from checks import peers
+from checks import identified, peers
 import simplex_sender
 
 
@@ -642,15 +642,15 @@ def collect(ctx):
                 active = ctx.unit(unit).get("ActiveState", "unknown")
                 ps = peers(ctx, stack)  # Exactly one coherent admin query per instance.
                 if stack:
-                    sample["stack_up"] = sum(p["up"] for p in ps)
+                    sample["stack_up"] = sum(identified(p) for p in ps)
                 else:
                     uptimes = {peer_label(p.get("remote")): p.get("uptime") for p in ps}
                     sample["act"] = active
-                    sample["up"] = sum(p["up"] for p in ps)
+                    sample["up"] = sum(identified(p) for p in ps)
                     sample["peers"] = [
                         {
                             "r": peer_label(p.get("remote")),
-                            "up": p["up"],
+                            "up": identified(p),
                             "rtt": p.get("latency", 0) / 1e6,
                             "rx": p.get("bytes_recvd", 0),
                             "tx": p.get("bytes_sent", 0),

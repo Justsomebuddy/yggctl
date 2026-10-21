@@ -1744,7 +1744,10 @@ class ConsoleTests(ConsoleFixture):
 
     @logged
     def test_wait_peers_respects_desired_and_paired_health(self):
-        up = [{"remote": URI.replace("192.0.2.1", f"192.0.2.{i}"), "up": True} for i in (1, 2)]
+        up = [
+            {"remote": URI.replace("192.0.2.1", f"192.0.2.{i}"), "up": True, "key": "1" * 64}
+            for i in (1, 2)
+        ]
         desired = "192.0.2.1:443"
         with patch("management.peers", return_value=up):
             management.wait_peers(self.ctx, desired, seconds=0)

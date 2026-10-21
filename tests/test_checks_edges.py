@@ -235,6 +235,21 @@ class CheckEdges(ConsoleFixture):
                     checks.timer_gate(self.ctx)
 
     @logged
+    def test_identified_requires_up_and_a_public_key(self):
+        peer = {"remote": URI, "up": True, "key": "a" * 64}
+        self.assertTrue(checks.identified(peer))
+        for broken in (
+            dict(peer, up=False),
+            dict(peer, key=""),
+            dict(peer, key="A" * 64),
+            dict(peer, key="a" * 63),
+            dict(peer, up=1),
+            {"remote": URI},
+        ):
+            with self.subTest(row=broken):
+                self.assertFalse(checks.identified(broken))
+
+    @logged
     def test_composite_check_runs_every_gate_even_on_failure(self):
         gates = (
             "guard",

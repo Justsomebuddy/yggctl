@@ -40,6 +40,16 @@ def peers(ctx, stack=False):
 
 
 @logged
+def identified(peer):
+    """A row is a peer only after the handshake gave it a public key.
+
+    getPeers reports up:true as soon as the transport connects, with an empty key,
+    so transport-only rows must not feed availability, alerts or convergence waits.
+    """
+    return peer.get("up") is True and bool(re.fullmatch(r"[0-9a-f]{64}", peer.get("key", "")))
+
+
+@logged
 def policy(ctx):
     return {
         "FW_RUNTIME_SHA": digest(

@@ -154,6 +154,7 @@ class MetricLimits(unittest.TestCase):
                 "up": True,
                 "inbound": False,
                 "latency": 1000000,
+                "key": f"{i + 1:064x}",
             }
             for i in range(15)
         ]

@@ -24,6 +24,16 @@ class TelemetryEdges(ConsoleFixture):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     @logged
+    def test_collect_does_not_count_a_transport_only_link_as_up(self):
+        self.ps[:] = [{"remote": URI, "up": True, "inbound": False, "key": ""}]
+        with self.assertRaisesRegex(Failure, "sample_recorded_with_unknown_or_degraded_health"):
+            tm.collect(self.ctx)
+        sample = tm.rows(self.ctx, "metrics.jsonl")[-1]
+        self.assertEqual(sample["up"], 0)
+        self.assertEqual(sample["peers"][0]["up"], False)
+        self.assertIn("no_up_peers", sample["errors"])
+
+    @logged
     def test_corrupt_rows_and_append_io_guards(self):
         with (
             patch.object(self.ctx, "read_state", return_value=b"[]\n"),

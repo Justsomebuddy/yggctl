@@ -68,7 +68,7 @@ class ConsoleFixture(unittest.TestCase):
         self.responses: dict[str, Any] = {}
         self.calls = []
         self.failed_command = None
-        self.ps = [{"remote": URI, "up": True, "inbound": False, "latency": 1000000}]
+        self.ps = [{"remote": URI, "up": True, "inbound": False, "latency": 1000000, "key": PIN}]
         config = {
             "Peers": [
                 URI,
