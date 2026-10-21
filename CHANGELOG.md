@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Do not reject a node because its peer list cannot be deduplicated. Yggdrasil
+  reports the same empty public key, port 0 and direction for every unreachable
+  peer, and the same key once per transport when a peer is reached over more than
+  one link (multilink). The `peers` projection compared `(key, port, inbound)`
+  and raised `research_duplicate_entry` for those normal states: the source was
+  marked invalid, `research capture` ended with
+  `research_partial_snapshot_saved_not_full_local_success`, and atlas lost its
+  peer observations. Peer rows are no longer deduplicated; `tree` and `paths`
+  rows keep their duplicate check because those do have an identity. The reply
+  stays bounded by the existing 4096-entry cap and the snapshot byte limit; no
+  schema, retention, privacy or telemetry change.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;

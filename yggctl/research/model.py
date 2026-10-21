@@ -89,7 +89,12 @@ def project(source, reply, stored=False):
                 if stored
                 else latency(p.get("latency"), 1e6),
             }
-            token = (row["key"], row["port"], row["inbound"])
+            # The daemon exposes no per-link identity: the same peer appears once per
+            # transport (multilink) with the same key, port and direction, and every
+            # unreachable peer reports the same empty key, port 0 and direction. Peer
+            # rows are therefore not deduplicated at all; the reply stays bounded by
+            # MAX_ENTRIES and by the snapshot byte limit.
+            token = None
         elif source == "tree":
             row = {
                 "key": public_key(p.get("key")),
@@ -109,9 +114,10 @@ def project(source, reply, stored=False):
             token = row["key"]
         else:
             raise Failure("research_unknown_source")
-        if token in seen:
-            raise Failure("research_duplicate_entry")
-        seen.add(token)
+        if token is not None:
+            if token in seen:
+                raise Failure("research_duplicate_entry")
+            seen.add(token)
         rows.append(row)
     return sorted(rows, key=lambda r: (r["key"] or "", r.get("port", 0), r.get("inbound", False)))
 
