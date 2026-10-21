@@ -2,15 +2,12 @@
 
 import datetime as dt
 import hashlib
-import ipaddress
 import json
 import os
-import re
 import secrets
 import stat
 import statistics
 import time
-import urllib.parse
 from typing import Any
 
 from core import (
@@ -22,21 +19,12 @@ from core import (
     atomic,
     timestamp,
     event,
+    public_peer_uri,
     METRIC_RETENTION,
     METRICS_LIMIT,
 )
 from checks import peers
 import simplex_sender
-
-
-# Only typed public pin/timing options can survive a peer's display identity.
-# Unknown options (including encoded/case-varied credentials) discard ALL URI
-# metadata, not only a guessed password value. Old safe labels remain stable.
-PUBLIC_PEER_OPTIONS = {
-    "key": r"[0-9a-fA-F]{64}",
-    "maxbackoff": r"[0-9]{1,5}(?:ms|s|m|h)",
-    "priority": r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])",
-}
 
 
 @logged
@@ -47,37 +35,7 @@ def peer_label(value):
     Existing queues/history are not rewritten: their IDs and delivery cursors
     must stay stable. Rendering applies this boundary again for legacy alerts.
     """
-    if not isinstance(value, str) or len(value) > 4096 or re.search(r"[\s\x00-\x1f]", value):
-        return "unknown-peer"
-    try:
-        uri = urllib.parse.urlsplit(value)
-        hostname = uri.hostname or ""
-        if "%" in hostname:
-            raise ValueError("scoped_endpoint_not_public_label")
-        host = ipaddress.ip_address(hostname)
-        port = uri.port
-    except ValueError:
-        return "unknown-peer"
-    if uri.scheme not in ("tls", "tcp", "quic", "ws", "wss") or not port:
-        return "unknown-peer"
-    authority = f"[{host}]" if host.version == 6 else str(host)
-    endpoint = f"{uri.scheme}://{authority}:{port}"
-    try:
-        options = urllib.parse.parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True)
-    except ValueError:
-        return endpoint
-    safe_options = len({k for k, _ in options}) == len(options) and all(
-        re.fullmatch(PUBLIC_PEER_OPTIONS.get(k, r"(?!)"), v) for k, v in options
-    )
-    if (
-        uri.username is None
-        and uri.password is None
-        and not uri.fragment
-        and uri.path in ("", "/")
-        and safe_options
-    ):
-        return value
-    return endpoint
+    return public_peer_uri(value) or "unknown-peer"
 
 
 @logged

@@ -27,6 +27,24 @@ class PrivacyRestore(ConsoleFixture):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     @logged
+    def test_console_output_redacts_peer_credentials(self):
+        from core import public_config
+
+        hostile = "tls://user:" + MARKER + "@192.0.2.1:443?password=" + MARKER
+        for data, expected in (
+            ({"peers": [{"remote": hostile}]}, {"peers": [{"remote": ENDPOINT}]}),
+            ("dial " + hostile + ": timeout", "dial " + ENDPOINT + ": timeout"),
+            (
+                "see tls://peer.example:443?password=" + MARKER + " now",
+                "see tls://peer.example:443 now",
+            ),
+            ("tls://@ now", "[REDACTED-URI] now"),
+        ):
+            clean = public_config(data)
+            self.assertNotIn(MARKER, json.dumps(clean))
+            self.assertEqual(clean, expected)
+
+    @logged
     def test_peer_label_allowlisted_public_parameters_and_hostile_uri_shapes(self):
         # Preserve the established public-pin/timing identity only for a fully
         # allowlisted shape. Everything else loses ALL userinfo/path/query/fragment.
