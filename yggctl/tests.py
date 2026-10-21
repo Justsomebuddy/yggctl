@@ -1212,9 +1212,16 @@ class ConsoleTests(ConsoleFixture):
             inside, outside = Path(d) / "inside", Path(d) / "outside"
             inside.write_text("0::/system.slice/yggctl-sandbox-atlas-1a2b3c4d.service\n")
             outside.write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+            forged = Path(d) / "forged"
+            forged.write_text(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                "yggctl-sandbox-atlas-1a2b3c4d.service\n"
+            )
             self.assertEqual(sandbox.own_unit(str(inside)), ("atlas", "1a2b3c4d"))
             self.assertTrue(sandbox.inside(str(inside)))
             self.assertFalse(sandbox.inside(str(outside)))
+            self.assertIsNone(sandbox.own_unit(str(forged)))
+            self.assertFalse(sandbox.inside(str(forged)))
             self.assertFalse(sandbox.inside(str(Path(d) / "missing")))
 
     @logged

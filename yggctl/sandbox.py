@@ -130,8 +130,14 @@ def own_unit(cgroup="/proc/self/cgroup"):
             text = f.read(65536)
     except OSError:
         return None
+    # Mirrors broker.process_cgroup: only this launch's unit inside /system.slice proves
+    # the sandbox. A suffix match would accept a caller-created user unit and skip the
+    # sandbox gate in dispatch() entirely.
     for line in text.splitlines():
-        m = re.search("/" + UNIT_PREFIX + r"(atlas|research|remote)-([0-9a-f]{8})\.service$", line)
+        m = re.fullmatch(
+            r"0::/system\.slice/" + UNIT_PREFIX + r"(atlas|research|remote)-([0-9a-f]{8})\.service",
+            line,
+        )
         if m:
             return m[1], m[2]
     return None
