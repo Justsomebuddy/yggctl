@@ -12,6 +12,7 @@ import unittest
 
 from core import (
     Context,
+    Failure,
     Paths,
     NODE,
     STACK,
@@ -25,6 +26,20 @@ from core import (
 
 PIN = "1" * 64
 URI = "tls://192.0.2.1:443?key=" + PIN + "&maxbackoff=30s"
+
+
+@logged
+def process_handoff_fixture(ctx, event_id, payload, timeout=20):
+    """Flow-only fake acceptance boundary, NOT a native SimpleX qualification."""
+    result = ctx.run(
+        ["/usr/local/bin/simplex-alert.sh"],
+        input=json.dumps(payload, ensure_ascii=False).encode(),
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode:
+        raise Failure("synthetic_handoff_failed")
+    return 1
 
 
 class ConsoleFixture(unittest.TestCase):

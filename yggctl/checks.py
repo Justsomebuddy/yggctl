@@ -136,6 +136,7 @@ def integrity(ctx):
             ctx.p.runtime / "rotate.py",
             ctx.p.runtime / "sandbox.py",
             ctx.p.runtime / "broker.py",
+            ctx.p.runtime / "simplex_sender.py",
             ctx.p.units / "ygg-alert-forward.service",
             ctx.p.units / "ygg-alert-forward.path",
             Path("/etc/sysusers.d/ygglab-worker.conf"),

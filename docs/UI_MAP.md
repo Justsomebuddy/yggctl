@@ -37,7 +37,7 @@ has been erased, or that an authenticated restore implementation now exists.
 | ALERT-GAP | Next observed sample | Unalerted downtime confirmation restarts at that sample. An already-alerted episode is not alerted down again; recovery carries `observation_gap=true` and text does not claim uninterrupted downtime. |
 | TELEMETRY-EMPTY | Successful node observation returning no peers | `peers_observed=true`; normal observed-empty tracking/removal semantics, not an unavailable query or invented recovery. Stack-only failure does not erase a successful node observation. |
 | CLI-RESTORE-BUDGET | `restore FILE` structural preview | 4 MiB compressed / 8 MiB TOTAL decompressed TAR / 1 MiB regular member. Metadata/padding/trailing and concatenated gzip are counted before TAR parsing. Reject over-budget/corrupt input without host writes; apply remains disabled. |
-| IPC-WORKER-PRINCIPAL | Sandboxed command launch | Shared UID authentication only, no per-PID/cgroup/unit binding or mutual compromised-worker isolation; [explicit limitations](SECURITY.md#worker-trust-principal-source-578-issue-7). |
+| IPC-WORKER-PRINCIPAL | Sandboxed command launch | Historical5.7.8 shared UID only; superseded by5.8.0 below; [explicit limitations](SECURITY.md#worker-trust-principal-source-578-issue-7). |
 
 Command syntax is unchanged. No history, pending payload, queue or cursor is
 silently rewritten. Gap-aware alert fields are additive; ordinary uninterrupted
@@ -56,12 +56,14 @@ Tests use bounded synthetic histories and sender outcomes, not live notification
 or multi-day evidence. See the actual bridge algorithm and limitations in
 `SIMPLEX_BRIDGE.md` (public) / doc35 (private). No new command or network policy.
 
-## Role identity (5.8.0; #7) — supersedes historical shared-UID row
+## Role identity/native handoff (5.8.0/5.9.0; #7/#9)
 
 | ID | Invocation/path | Expected result / failure |
 |---|---|---|
-| IPC-WORKER-PRINCIPAL | Sandboxed launch | Three provisioned role users; kernel UID AND expected unified systemd cgroup. Wrong-instance client rejected before serving; shared same-role stores remain. |
-| IPC-MIGRATION-GUARD | Worker lifetime / ownership migration | Shared/exclusive barrier before console lock; normal roles concurrent, finite migration wait. |
+| IPC-WORKER-PRINCIPAL | Sandboxed launch | Three distinct provisioned role users; kernel UID AND expected unified systemd cgroup required. Wrong-instance connection rejected before serving; no same-role store isolation claim. |
+| ALERT-NATIVE-HANDOFF | `alerts-forward` | Cursor only after durable native-recorded receipt; stdout distinguishes local recording from delivery/ACK. Process rc0/no item stays pending. |
+| ALERT-AMBIGUOUS | Retry after durable attempt but no proof | Nonzero/pending, no automatic second send; later matching native item can recover. |
+| ALERT-CONFIG | Missing/unsafe/incompatible native config/profile/journal | Fail closed, no legacy sender fallback or cursor reset. |
 
-Help names separate role users. Reviewed external provisioning/ownership migration
-is required; publication does not update an installed console.
+CLI syntax is unchanged; help names separate role users. Installation requires
+reviewed provisioning/migration; publication alone changes no installed runtime.

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Source 5.9.0 — durable native handoff (#9)
+
+- Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;
+  stable event/text/profile binding and intent/receipt/cursor crash recovery.
+- Process rc0 is never cursor authority; ambiguous absence stays pending
+  without blind resend. No exactly-once/remote delivery/human ACK claim.
+- Private configuration, qualified existing ordinary-SQLite profile/schema,
+  trusted binary and all-writer shared lock are required external integration.
+  Shared bridge/other chains and installed runtimes are unchanged by publication.
+- Native SQLite/lock/concurrency, kernel child-death and composed failure tests;
+  seven flow-only cases moved to a focused supplemental module, not dropped.
+
 ### Source 5.8.0 — worker identity (#7)
 
 - Separate non-root role principals and kernel SO_PEERCRED UID/PID bound to
@@ -13,8 +25,6 @@
   installer or arbitrary-parent-death/compromised-worker isolation guarantee.
 - Cgroup, custody, contention and native-credential regression contracts;
   matching integration/security/UI documentation, unchanged strict QA gates.
-
-
 
 ### Source 5.7.9 — history writer and bridge contract
 

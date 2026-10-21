@@ -7,7 +7,6 @@ import io
 import json
 
 # Fixed synthetic process results only, never a shell.
-import subprocess  # nosec B404
 import time
 import unittest
 from unittest.mock import patch
@@ -196,51 +195,6 @@ class HistorySender(unittest.TestCase):
         self.assertEqual(after["down"], before)
         self.collect_at(11, OSError())
         self.assertEqual(self.events(), [])
-
-    @logged
-    def test_rc0_handled_command_error_is_only_process_checkpoint(self):
-        atomic(
-            self.p.state / "alerts.jsonl",
-            json.dumps({"id": "boundary-id", "kind": "labelled-local-selftest"}) + "\n",
-        )
-        atomic(self.p.state / "alerts-forwarded.json", '{"sent":[]}\n')
-
-        @logged
-        def sender(argv, **kwargs):
-            return subprocess.CompletedProcess(argv, 0, b"synthetic command error", b"")
-
-        with patch.object(self.ctx, "runner", sender):
-            tm.forward(self.ctx)
-        self.assertEqual(
-            len(json.loads((self.p.state / "alerts-forwarded.json").read_bytes())["sent"]), 1
-        )
-        self.assertIn("NOT command acceptance/delivery/human ACK", self.output.getvalue())
-
-    @logged
-    def test_accept_then_timeout_can_retry_without_native_idempotency(self):
-        atomic(
-            self.p.state / "alerts.jsonl",
-            json.dumps({"id": "boundary-id", "kind": "labelled-local-selftest"}) + "\n",
-        )
-        atomic(self.p.state / "alerts-forwarded.json", '{"sent":[]}\n')
-        accepted = []
-
-        @logged
-        def sender(argv, **kwargs):
-            accepted.append(kwargs["input"])
-            if len(accepted) == 1:
-                raise Failure("synthetic_accept_then_timeout")
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-        with patch.object(self.ctx, "runner", sender):
-            with self.assertRaisesRegex(Failure, "alert_forward_failed"):
-                tm.forward(self.ctx)
-            self.assertEqual(
-                json.loads((self.p.state / "alerts-forwarded.json").read_bytes())["sent"], []
-            )
-            tm.forward(self.ctx)
-        self.assertEqual(len(accepted), 2)
-        self.assertEqual(accepted[0], accepted[1])
 
 
 @logged
