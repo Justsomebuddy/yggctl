@@ -1,7 +1,10 @@
 """Bounded local research commands; no external crawl or network mutation."""
 
+import contextlib
 import datetime as dt
+import fcntl
 import json
+import os
 import re
 import stat
 import time
@@ -37,15 +40,53 @@ def folder(ctx, create=False):
 
 @logged
 def snapshot_files(ctx):
-    root = folder(ctx)
-    if root is None:
-        return []
-    found = []
-    # No arbitrary directories, links, or unrestricted root glob traversal.
-    # Stop before a hostile/unbounded directory can consume memory.
+    with ctx.locked():
+        root = folder(ctx)
+        if root is None:
+            return []
+        with store_locked(root):
+            return scan_store(root)
+
+
+@contextlib.contextmanager
+def store_locked(root):
+    # The worker must own this lock: its parent can die and release the
+    # console lock while an atomic artifact write is still in progress.
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Failure("research_store_busy") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+@logged
+def store_atomic(path, data):
+    with store_locked(path.parent):
+        atomic(path, data)
+
+
+@logged
+def scan_store(root):
+    found, abandoned = [], []
+    # Validate the entire bounded directory before removing anything.
     for i, path in enumerate(root.iterdir()):
         if i >= LIMIT * 3:
             raise Failure("research_store_entry_limit")
+        if re.fullmatch(r"\.yggctl-[a-z0-9_]{8}", path.name):
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+            ):
+                raise Failure("research_unsafe_temporary_file")
+            abandoned.append(path)
+            continue
         if re.fullmatch(r"snapshot-[0-9a-f]{32}\.json", path.name):
             found.append(path)
         elif not re.fullmatch(
@@ -56,6 +97,9 @@ def snapshot_files(ctx):
             raise Failure("research_unsafe_store_entry")
     if len(found) > LIMIT:
         raise Failure("research_snapshot_limit")
+    for path in abandoned:
+        path.unlink()
+        event("state", "research_store", "abandoned_atomic_removed")
     return found
 
 
@@ -153,7 +197,7 @@ def capture(ctx):
         if len(data.encode()) > BYTE_LIMIT:
             raise Failure("research_projected_snapshot_size_limit")
         out = root / ("snapshot-" + result["id"] + ".json")
-        atomic(out, data + "\n")
+        store_atomic(out, data + "\n")
         event("state", "research_capture", "saved_allowlisted_projection")
         failures = sum(s != "ok" for s in result["sources"].values()) + int(
             result["identity_stable"] is not True
@@ -174,7 +218,7 @@ def topology_map(ctx, value=None):
         snapshot = selected(ctx, value)
         data = model.graph(snapshot)
         out = folder(ctx) / ("map-" + snapshot["id"] + ".dot")
-        atomic(out, model.dot(snapshot))
+        store_atomic(out, model.dot(snapshot))
         return {
             "snapshot_id": snapshot["id"],
             "sources": snapshot["sources"],
@@ -334,7 +378,7 @@ def report(ctx, hours=24):
         }
         if latest:
             out = root / ("map-" + latest["id"] + ".dot")
-            atomic(out, model.dot(latest))
+            store_atomic(out, model.dot(latest))
             result["dot_file"] = str(out)
         identifier = uuid.uuid4().hex
         payload = json.dumps(result, sort_keys=True, allow_nan=False)
@@ -342,8 +386,8 @@ def report(ctx, hours=24):
             raise Failure("research_report_size_limit")
         out = root / ("report-" + identifier)
         # Independent immutable UUID artifacts; no accepted-baseline mutation.
-        atomic(out.with_suffix(".json"), payload + "\n")
-        atomic(out.with_suffix(".md"), markdown(result))
+        store_atomic(out.with_suffix(".json"), payload + "\n")
+        store_atomic(out.with_suffix(".md"), markdown(result))
         event("state", "research_report", "saved_scoped_artifacts")
         elapsed = time.monotonic() - start
         print(

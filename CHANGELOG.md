@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Research interrupted-write recovery
+
+- Recover validated abandoned atomic-write temporaries on the next Research
+  scan, retaining completed snapshots/reports and existing storage limits.
+- Coordinate scans and artifact writes with a worker-owned directory lock;
+  report contention and unsafe entries explicitly instead of deleting live data.
+- Add owned-process crash/restart, manual CLI and repeated automation scenarios.
+  Installed timers/systemd integration are not exercised by these fixtures.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;

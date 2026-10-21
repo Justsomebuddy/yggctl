@@ -62,6 +62,29 @@ exactly-once delivery is not promised.
 
 ### Other commands
 
+Research scans recover abandoned atomic-write files with the reserved name
+`.yggctl-` followed by eight lowercase letters, digits or underscores. Before
+removing any such file, the entire directory must pass the existing entry and
+snapshot limits and filename/type checks. Temporary files must be regular,
+owned by the effective user, mode `0600`, and have one link. Unknown or unsafe
+entries and removal errors remain explicit failures; finished artifacts are
+preserved. An interrupted capture is discarded, not promoted to a snapshot.
+
+Research artifact writes and recovery scans take an exclusive, nonblocking
+Linux `flock` on the directory itself. The writing worker owns this lock even
+if its parent dies. A concurrent writer/scan reports `research_store_busy`
+without removing the active temporary; a later invocation can retry. The
+directory lock protects individual writes, not a transaction spanning a whole
+orphaned worker run or both report formats. JSON and Markdown can still be
+partially published if the process dies between their writes.
+
+All Research writers must use this locking protocol. Stop existing Research
+workers before deploying the change; older code does not acquire this lock.
+The lock is advisory and does not protect against a process with directory
+write access that bypasses it. Qualify directory `flock` support on the deployed
+Linux filesystem. External timers should check exit status and report age;
+successful recovery on a later tick does not reconstruct missed observations.
+
 Peer/config transactions generally preview unless `--apply` is supplied.
 **This is not a global dry-run guarantee.** Service controls and some other
 commands have immediate effects. Network commands and atlas acquisition can
