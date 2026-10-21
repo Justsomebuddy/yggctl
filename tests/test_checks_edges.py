@@ -186,8 +186,14 @@ class CheckEdges(ConsoleFixture):
             checks.service_gate(self.ctx, NODE)
         with self.assertRaisesRegex(Failure, "less_than_two"):
             checks.peer_gate(self.ctx, False)
+        self.ps[0]["key"] = "a" * 64
         self.ps.append(dict(self.ps[0], remote=URI.replace("192.0.2.1", "192.0.2.2")))
         checks.peer_gate(self.ctx, True)
+        # up:true without a key is a transport-only link, not a peer
+        for row in self.ps:
+            row["key"] = ""
+        with self.assertRaisesRegex(Failure, "less_than_two"):
+            checks.peer_gate(self.ctx, True)
         for method, field, good, bad, fn in (
             ("getMulticastInterfaces", "multicast_interfaces", [], [{}], checks.multicast_gate),
             ("getTun", "enabled", False, True, checks.tun_gate),

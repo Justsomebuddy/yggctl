@@ -298,7 +298,13 @@ def service_gate(ctx, unit):
 def peer_gate(ctx, stack):
     rows = peers(ctx, stack)
     expected = set(ctx.config("yggstack.conf" if stack else "yggdrasil-lab.conf")["Peers"])
-    up = {endpoint(p.get("remote", "")) for p in rows if p["up"] and not p.get("inbound")}
+    # A transport-only link reports up:true before the handshake and carries no public key;
+    # it is not a peer (research/atlas already skip such rows for the same reason).
+    up = {
+        endpoint(p.get("remote", ""))
+        for p in rows
+        if p["up"] and not p.get("inbound") and re.fullmatch(r"[0-9a-f]{64}", p.get("key", ""))
+    }
     if len(up & {endpoint(p) for p in expected}) < 2:
         raise Failure("less_than_two_configured_peers_up")
 
