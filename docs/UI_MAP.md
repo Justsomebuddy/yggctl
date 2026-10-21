@@ -55,3 +55,13 @@ a host's systemd boundary or an installation.
 Tests use bounded synthetic histories and sender outcomes, not live notification
 or multi-day evidence. See the actual bridge algorithm and limitations in
 `SIMPLEX_BRIDGE.md` (public) / doc35 (private). No new command or network policy.
+
+## Role identity (5.8.0; #7) — supersedes historical shared-UID row
+
+| ID | Invocation/path | Expected result / failure |
+|---|---|---|
+| IPC-WORKER-PRINCIPAL | Sandboxed launch | Three provisioned role users; kernel UID AND expected unified systemd cgroup. Wrong-instance client rejected before serving; shared same-role stores remain. |
+| IPC-MIGRATION-GUARD | Worker lifetime / ownership migration | Shared/exclusive barrier before console lock; normal roles concurrent, finite migration wait. |
+
+Help names separate role users. Reviewed external provisioning/ownership migration
+is required; publication does not update an installed console.

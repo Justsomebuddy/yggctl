@@ -24,7 +24,7 @@ includes no acquired observations or operating node identities.
 | Configuration | `/etc/yggdrasil-lab` and `/usr/local/libexec/yggdrasil-lab/config-json` |
 | Decoder | Separately provisioned HJSON-to-JSON helper; its source/binary and Go dependencies are not included |
 | Runtime/state | Dedicated `/run/yggdrasil-lab` and `/var/lib/yggdrasil-lab` trees |
-| Isolation | systemd, `ygglab-worker`, broker under `/run/yggctl-broker`, Linux `/proc` |
+| Isolation | systemd/cgroup-v2, three role principals, broker under `/run/yggctl-broker`, Linux `/proc` |
 | Policy | Independently reviewed firewall/nftables baseline; some checks assume Mullvad |
 | Monitoring | Existing metrics timer/service and optional external SimpleX sender |
 | Integrity | A pre-provisioned manifest that also covers files outside this repository |
@@ -69,3 +69,8 @@ initiate traffic. Several legacy operations, including `purge`, `rotate-key`,
 
 Do not run operational commands against a production host to test this tree.
 Any integration or deployment requires a separate plan and rollback.
+
+## Source 5.8.0 worker integration
+
+Reviewed separate-role [provisioning/migration](WORKER_IDENTITY.md) is required;
+source publication is not installation.

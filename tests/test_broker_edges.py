@@ -22,6 +22,7 @@ class BrokerEdges(ConsoleFixture):
         obj = broker.Broker.__new__(broker.Broker)
         obj.ctx, obj.role, obj.uid = self.ctx, "research", 1000
         obj.stop, obj.server = threading.Event(), Mock()
+        obj.cgroup, obj.conn = broker.process_cgroup(os.getpid()), None
         return obj
 
     @logged
@@ -48,14 +49,20 @@ class BrokerEdges(ConsoleFixture):
             ),
             self.assertRaisesRegex(Failure, "broker_directory_untrusted"),
         ):
-            broker.Broker(self.ctx, "research", uid=1000, directory=directory)
+            broker.Broker(
+                self.ctx,
+                "research",
+                uid=1000,
+                directory=directory,
+                expected_cgroup=broker.process_cgroup(os.getpid()),
+            )
 
     @logged
     def test_accept_timeout_foreign_uid_error_and_stop(self):
         obj = self.server()
         wrong, right = Mock(), Mock()
         wrong.getsockopt.return_value = struct.pack("3i", 1, 999, 999)
-        right.getsockopt.return_value = struct.pack("3i", 1, 1000, 1000)
+        right.getsockopt.return_value = struct.pack("3i", os.getpid(), 1000, 1000)
         obj.server.accept.side_effect = [socket.timeout(), (wrong, None), (right, None)]
         self.assertIs(obj.accept(), right)
         wrong.close.assert_called_once_with()

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Source 5.8.0 — worker identity (#7)
+
+- Separate non-root role principals and kernel SO_PEERCRED UID/PID bound to
+  the parent-selected unified systemd cgroup; reject foreign clients before
+  requests and close idle broker sockets on shutdown.
+- Shared worker-lifetime/exclusive migration barrier prevents ownership races;
+  normal roles remain concurrent. Same-role stores/principal remain shared.
+- External provisioning/ownership migration is required; this is not an
+  installer or arbitrary-parent-death/compromised-worker isolation guarantee.
+- Cgroup, custody, contention and native-credential regression contracts;
+  matching integration/security/UI documentation, unchanged strict QA gates.
+
+
+
 ### Source 5.7.9 — history writer and bridge contract
 
 - Fix #10: pre-write atomic byte/count bounded suffix compaction; history-write

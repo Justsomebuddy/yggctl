@@ -1152,7 +1152,7 @@ class ConsoleTests(ConsoleFixture):
         self.assertEqual(unit, "yggctl-sandbox-research-1a2b3c4d.service")
         props = [argv[i + 1] for i, v in enumerate(argv) if v == "-p"]
         for required in (
-            "User=ygglab-worker",
+            "User=ygglab-research",
             "NoNewPrivileges=yes",
             "CapabilityBoundingSet=",
             "ProtectSystem=strict",
@@ -1322,7 +1322,13 @@ class ConsoleTests(ConsoleFixture):
             stack.callback(os.close, fd)
             directory = Path(f"/proc/self/fd/{fd}/broker")
             served = stack.enter_context(
-                broker.Broker(parent, "research", uid=os.getuid(), directory=directory)
+                broker.Broker(
+                    parent,
+                    "research",
+                    uid=os.getuid(),
+                    directory=directory,
+                    expected_cgroup=broker.process_cgroup(os.getpid()),
+                )
             )
             self.assertEqual(directory.stat().st_uid, os.geteuid())
             self.assertEqual(directory.stat().st_mode & 0o777, 0o711)
@@ -1333,7 +1339,13 @@ class ConsoleTests(ConsoleFixture):
             stack.callback(worker.reader.close)
             self.assertEqual(worker.api("getSelf")["method"], "getSelf")
             remote = stack.enter_context(
-                broker.Broker(parent, "remote", uid=os.getuid(), directory=directory)
+                broker.Broker(
+                    parent,
+                    "remote",
+                    uid=os.getuid(),
+                    directory=directory,
+                    expected_cgroup=broker.process_cgroup(os.getpid()),
+                )
             )
             remote_worker = broker.WorkerContext(remote.path, paths=self.paths)
             stack.callback(remote_worker.conn.close)
@@ -1392,7 +1404,13 @@ class ConsoleTests(ConsoleFixture):
             fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             stack.callback(os.close, fd)
             directory = Path(f"/proc/self/fd/{fd}/broker")
-            with broker.Broker(parent, "remote", uid=os.getuid(), directory=directory) as served:
+            with broker.Broker(
+                parent,
+                "remote",
+                uid=os.getuid(),
+                directory=directory,
+                expected_cgroup=broker.process_cgroup(os.getpid()),
+            ) as served:
                 served.uid = os.getuid() + 1  # the broker now expects another worker uid
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.settimeout(10)  # generous under load; a rejection is immediate
@@ -1408,7 +1426,13 @@ class ConsoleTests(ConsoleFixture):
                 self.assertEqual(reply, b"")
                 client.close()
             with (
-                broker.Broker(parent, "remote", uid=os.getuid(), directory=directory) as served,
+                broker.Broker(
+                    parent,
+                    "remote",
+                    uid=os.getuid(),
+                    directory=directory,
+                    expected_cgroup=broker.process_cgroup(os.getpid()),
+                ) as served,
                 contextlib.ExitStack() as worker_stack,
             ):
                 worker = broker.WorkerContext(served.path, paths=self.paths)

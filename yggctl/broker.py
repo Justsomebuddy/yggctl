@@ -1,11 +1,10 @@
 """Privilege separation for sandboxed commands.
 
-Sandboxed commands run as the unprivileged ygglab-worker user. The root parent serves
-the worker a few role-scoped read-only calls over a private Unix socket: admin API methods
-allowlisted for that worker's role (local reads for every role, remote-node queries only
-for the role whose unit may reach the network), with output passed through as raw bytes
-and never parsed as root, and, for research, the metrics file. The node admin socket
-itself stays root-only.
+Sandboxed commands use separate role users. The root parent authenticates both the
+kernel peer UID and its exact parent-selected systemd cgroup before serving
+the worker a few read-only calls over a private Unix socket: allowlisted admin API
+methods of the local node (output passed through as raw bytes, never parsed as root)
+and, for research, the metrics file. The node admin socket itself stays root-only.
 """
 
 import base64
@@ -18,25 +17,22 @@ import secrets
 import socket
 import stat
 import struct
-
-# Security review: mock-compatible result records; no process is spawned here
-import subprocess  # nosec B404
+import subprocess  # nosec B404 # CompletedProcess only; process execution uses Context.
 import threading
 from pathlib import Path
 
 from core import Context, Failure, event, logged, METRICS_LIMIT
 
-WORKER = "ygglab-worker"
+USERS = {"research": "ygglab-research", "atlas": "ygglab-atlas", "remote": "ygglab-remote"}
 BROKER_DIR = Path("/run/yggctl-broker")
 LOCAL = frozenset({"getself", "getpeers", "gettree", "getpaths", "getsessions"})
 REMOTE = frozenset(
     {"getnodeinfo", "debug_remotegetself", "debug_remotegetpeers", "debug_remotegettree"}
 )
-# Admin methods each sandbox role may ask the parent to run. Only the role whose
-# unit is allowed network access may reach methods that talk to other nodes.
+# The role is chosen by the parent, never by the worker's request.
+# Atlas needs exactly its three debug reads; research cannot initiate remote queries.
 ADMIN_METHODS = {
     "research": LOCAL,
-    # Atlas crawl needs these three debug reads, not arbitrary nodeinfo requests.
     "atlas": LOCAL | (REMOTE - {"getnodeinfo"}),
     "remote": LOCAL | REMOTE,
 }
@@ -48,16 +44,40 @@ METRICS_REPLY_LIMIT = 4 * ((METRICS_LIMIT + 2) // 3) + 12
 
 
 @logged
-def worker_uid():
+def worker_uid(role="research"):
     try:
-        return pwd.getpwnam(WORKER).pw_uid
+        uid = pwd.getpwnam(USERS[role]).pw_uid
     except KeyError:
         raise Failure("sandbox_worker_user_missing") from None
+    if uid <= 0:
+        raise Failure("sandbox_worker_must_be_unprivileged")
+    return uid
+
+
+@logged
+def process_cgroup(pid, proc=Path("/proc")):
+    """Bounded kernel cgroup-v2 observation; never trust a request's role/PID."""
+    if type(pid) is not int or pid <= 0:
+        raise Failure("broker_peer_pid_invalid")
+    event("external_start", "broker_peer_cgroup")
+    # procfs reports st_size=0 even for nonempty files. Bound the actual read,
+    # rather than using the regular-state-file size/equality contract.
+    with open(proc / str(pid) / "cgroup", "rb") as stream:
+        data = stream.read(8193)
+    if len(data) > 8192:
+        raise Failure("file_size_limit")
+    # Hybrid hosts can also expose v1 controllers (e.g. net_cls). Only the
+    # unique unified-hierarchy row is authoritative for the system unit.
+    groups = [line[3:] for line in data.decode("ascii").splitlines() if line.startswith("0::/")]
+    if len(groups) != 1:
+        raise Failure("broker_peer_cgroup_invalid")
+    event("external_exit", "broker_peer_cgroup", "observed")
+    return groups[0]
 
 
 @logged
 def admin_argv(ctx, method, args, role):
-    """Rebuild a yggdrasilctl call from a method allowlisted for this sandbox role."""
+    """Rebuild a role-allowlisted yggdrasilctl call with validated arguments."""
     name = method.lower() if isinstance(method, str) else ""
     if name not in ADMIN_METHODS.get(role, frozenset()):
         raise Failure("broker_call_not_allowed")
@@ -77,19 +97,23 @@ def admin_argv(ctx, method, args, role):
 
 
 class Broker:
-    """Parent side: one private socket that serves one connection from the worker uid."""
+    """One client from the selected role UID AND this launch's exact system unit."""
 
     @logged
-    def __init__(self, ctx, role, uid=None, directory=BROKER_DIR):
+    def __init__(self, ctx, role, uid=None, directory=BROKER_DIR, *, expected_cgroup=None):
+        if role not in USERS:
+            raise Failure("sandbox_unknown_role")
         self.ctx, self.role = ctx, role
-        self.uid = worker_uid() if uid is None else uid
+        self.uid = worker_uid(role) if uid is None else uid
         self.unit_id = secrets.token_hex(4)
+        self.cgroup = (
+            expected_cgroup or f"/system.slice/yggctl-sandbox-{role}-{self.unit_id}.service"
+        )
         directory.mkdir(mode=0o711, exist_ok=True)
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             raise Failure("broker_directory_untrusted")
-        # Security review: worker needs traversal only; socket is uid-owned 0600 and peer credentials checked
-        os.chmod(directory, 0o711)  # nosec B103
+        os.chmod(directory, 0o711)  # nosec B103 # traversal only; socket is 0600 + kernel-authenticated.
         self.path = directory / f"{role}-{self.unit_id}.sock"
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(self.path))
@@ -98,8 +122,19 @@ class Broker:
         self.server.listen(1)
         self.server.settimeout(0.5)
         self.stop = threading.Event()
+        self.conn = None
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
+
+    @logged
+    def peer_allowed(self, conn):
+        try:
+            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            pid, uid, _gid = struct.unpack("3i", creds)
+            return uid == self.uid and process_cgroup(pid) == self.cgroup
+        except (OSError, Failure, ValueError, UnicodeError, struct.error):
+            event("state", "broker", "peer_identity_unavailable_rejected")
+            return False
 
     @logged
     def accept(self):
@@ -110,8 +145,7 @@ class Broker:
                 continue
             except OSError:
                 return None
-            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-            if struct.unpack("3i", creds)[1] == self.uid:
+            if self.peer_allowed(conn):
                 return conn
             event("state", "broker", "foreign_peer_rejected")
             conn.close()
@@ -122,12 +156,18 @@ class Broker:
         conn = self.accept()
         if conn is None:
             return
-        with conn, conn.makefile("rb") as reader:
-            while not self.stop.is_set():
-                line = reader.readline(LINE_LIMIT + 1)
-                if not line or len(line) > LINE_LIMIT:
-                    return
-                conn.sendall(json.dumps(self.handle(line), separators=(",", ":")).encode() + b"\n")
+        self.conn = conn
+        try:
+            with conn, conn.makefile("rb") as reader:
+                while not self.stop.is_set():
+                    line = reader.readline(LINE_LIMIT + 1)
+                    if not line or len(line) > LINE_LIMIT:
+                        return
+                    conn.sendall(
+                        json.dumps(self.handle(line), separators=(",", ":")).encode() + b"\n"
+                    )
+        except OSError:
+            event("state", "broker", "connection_closed")
 
     @logged
     def handle(self, line):
@@ -162,6 +202,9 @@ class Broker:
         self.stop.set()
         with contextlib.suppress(OSError):
             self.server.close()
+        if self.conn is not None:
+            with contextlib.suppress(OSError):
+                self.conn.shutdown(socket.SHUT_RDWR)
         with contextlib.suppress(OSError):
             self.path.unlink()
         self.thread.join(timeout=2)
@@ -174,11 +217,7 @@ class Broker:
 
 
 class WorkerContext(Context):
-    """Worker side: no root and no console lock.
-
-    The parent runs the integrity check for every sandboxed role before starting the unit,
-    and the sockets check for the commands that read it, so the worker does not repeat them.
-    """
+    """Worker side: parent checks integrity; sockets are checked for bench/socks-test."""
 
     parent_verified = frozenset({"integrity", "sockets"})
 

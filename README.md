@@ -1,6 +1,6 @@
-> Source **5.7.9**: history byte-cap recovery and failure-independent alert
-> processing (#10); [actual SimpleX bridge contract](docs/SIMPLEX_BRIDGE.md) (#9).
-> The bridge remains best-effort: process rc0 is not command acceptance or delivery.
+> Source **5.8.0**: separate worker-role principals and kernel expected-unit
+> admission (#7). The earlier [SimpleX bridge](docs/SIMPLEX_BRIDGE.md) remains
+> best-effort: process rc0 is not command acceptance or delivery (#9).
 
 # yggctl
 
@@ -15,6 +15,12 @@ tool. It complements rather than replaces upstream `yggdrasilctl`.
 > does not provide all prerequisites. Running privileged commands on an existing
 > host can stop services or alter configuration. No fresh-machine installation
 > or production-readiness guarantee is provided.
+
+## Source 5.8.0 integration notice
+
+Separate worker principals and expected-unit admission require reviewed
+[provisioning/migration](docs/WORKER_IDENTITY.md). Same-role stores remain shared.
+This reference-source change never updates an installed console.
 
 ## Scope
 
@@ -48,9 +54,9 @@ cd ..
 The suites use temporary directories, mocked system commands and local Unix
 sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
-The stdlib suites contain 100 console + 23 research + 33 atlas tests.
+The stdlib suites contain 113 console + 23 research + 33 atlas tests.
 With QA dependencies, Pytest also runs supplemental adversarial/property cases:
-243 unique tests, with measured 100% production statement and branch coverage
+310 unique tests, with measured 100% production statement and branch coverage
 on Python 3.14.8. This does not qualify a live deployment or prove correctness.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).
