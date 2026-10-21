@@ -24,6 +24,23 @@ class TelemetryEdges(ConsoleFixture):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     @logged
+    def test_stats_uses_the_first_duplicate_row_and_reports_absence(self):
+        at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=2)
+        first = {
+            "ts": at.isoformat(),
+            "up": 1,
+            "peers": [{"r": URI, "up": True, "rtt": 1}, {"r": URI, "up": False, "rtt": 0}],
+        }
+        second = {"ts": (at + dt.timedelta(minutes=1)).isoformat(), "up": 0, "peers": []}
+        for sample in (first, second):
+            tm.append(self.ctx, "metrics.jsonl", sample)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            tm.stats(self.ctx, 1)
+        line = [row for row in output.getvalue().splitlines() if "observed_avail" in row][0]
+        self.assertIn("observed_avail=100.0% present=1 absent=1", line)
+
+    @logged
     def test_corrupt_rows_and_append_io_guards(self):
         with (
             patch.object(self.ctx, "read_state", return_value=b"[]\n"),

@@ -730,14 +730,20 @@ def stats(ctx, hours=24, graph=False):
     gaps = sum(
         max(0, round((b[0] - a[0]).total_seconds() / 60) - 1) for a, b in zip(values, values[1:])
     )
-    names = sorted({p["r"] for _, r in values for p in r.get("peers", [])})
+    # One pass over the window instead of a scan of every record for every peer name.
+    index: dict[str, dict[int, dict[str, Any]]] = {}
+    for position, (_, row) in enumerate(values):
+        for peer in row.get("peers", []):
+            index.setdefault(peer["r"], {}).setdefault(position, peer)
+    names = sorted(index)
     print(
         f"window={hours}h samples={len(values)} unknown_records={unknown} "
         f"invalid_records={invalid} missing_minutes_between_samples={gaps}; "
         f"observed availability is NOT wall-clock uptime"
     )
     for name in names:
-        matches = [next((p for p in r.get("peers", []) if p["r"] == name), None) for _, r in values]
+        by_position = index[name]
+        matches = [by_position.get(position) for position in range(len(values))]
         known = [p for p in matches if p is not None]
         up = sum(p["up"] for p in known)
         latency = [p["rtt"] for p in known if p["up"] and p.get("rtt", 0) > 0]
