@@ -44,6 +44,13 @@ these source files alone are not a complete security boundary.
 
 ### Peer alert persistence
 
+If replaying older pending alerts fails, collection still attempts to persist
+the fresh peer observation (including an unknown-observation gap), then reports
+the replay error if staging succeeds. It does not retry or acknowledge the
+failed queue in that call. Invalid state, full pending capacity or state-write failure can still
+prevent staging and remain explicit errors, with the replay error chained as
+context; this is not unlimited buffering.
+
 Peer transitions and their pending notification events share one atomic
 `alert-state.json` update. Pending records keep their original timestamp and
 stable ID. Later collections replay them into `alerts.jsonl`, comparing IDs

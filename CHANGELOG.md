@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Peer observations during queue recovery failures
+
+- Preserve fresh peer transitions and unknown-observation gaps when replaying
+  older pending alerts fails. The collector still reports the failure; queue
+  contents and existing pending IDs are not discarded or silently repaired.
+- Keep the initial drain for full recoverable outboxes. State validation,
+  pending capacity and state-size limits remain enforced.
+- Add synthetic failed-replay, separate-outage, corruption, conflict and
+  capacity regression tests. No live deployment or sender qualification.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;

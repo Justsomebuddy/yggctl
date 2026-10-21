@@ -674,7 +674,15 @@ def collect(ctx):
         enabled = notify_state(ctx) == "on"
         if enabled:
             # Drain first: a full recoverable outbox must not block its own retry.
-            flush_peer_alerts(ctx)
+            try:
+                flush_peer_alerts(ctx)
+            except (Failure, OSError):
+                # Queue recovery must not hide an observation already obtained.
+                # Stage under the same lock, retaining pending IDs and all state
+                # validation/capacity checks. Do not retry or acknowledge the
+                # failed queue here; surface its original error after staging.
+                peer_alerts(ctx, sample, uptimes)
+                raise
         peer_alerts(ctx, sample, uptimes)
         if enabled:
             flush_peer_alerts(ctx)
