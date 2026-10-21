@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Pending replay acknowledgement after queue rotation
+
+- Recheck pending event IDs and content against the final queue after replay
+  appends. Events evicted by compaction remain pending with their original
+  payload and ID; the collector reports partial replay for a later retry.
+- Preserve the queue/directory durability barrier before acknowledging events.
+  Queue retention after acknowledgement and external delivery are unchanged.
+- Add synthetic process-crash/rotation, full-batch, read-failure and durability
+  regressions using temporary state; no live sender or deployment is involved.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;

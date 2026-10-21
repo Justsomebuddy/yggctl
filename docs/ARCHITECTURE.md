@@ -49,6 +49,12 @@ Peer transitions and their pending notification events share one atomic
 stable ID. Later collections replay them into `alerts.jsonl`, comparing IDs
 and content to avoid re-appending an already queued event. Both the queue file
 and its parent directory are synced before pending records are retired.
+After replay appends, IDs and complete payloads are checked again against the
+final queue: compaction may have evicted an earlier already-queued event. Such
+events remain pending and replay reports `alert_pending_retained_after_queue_rotation`;
+a later call retries them with unchanged IDs. Read or sync failure leaves the
+pending batch unacknowledged. This does not protect already-acknowledged queue
+records from later retention or establish external delivery.
 
 Legacy state without pending records is accepted. Malformed state/outbox data,
 conflicting IDs, more than 1000 pending events or a state larger than 1 MiB fail

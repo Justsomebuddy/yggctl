@@ -305,9 +305,17 @@ def flush_peer_alerts(ctx):
             else:
                 append(ctx, "alerts.jsonl", item, PEER_PENDING_LIMIT)
                 event("alert", "peer_outbox", item["kind"])
+        # Appending a later event may compact away an earlier already-queued
+        # pending event. Acknowledge against the final queue, not the snapshot
+        # taken before these writes; retain exact IDs and payloads for retry.
+        queued = {alert_id(row): row for row in rows(ctx, "alerts.jsonl")}
+        remaining = [item for item in pending if queued.get(item["id"]) != item]
         sync_alert_queue(ctx)
-        state["pending"] = []
+        state["pending"] = remaining
         save_peer_state(ctx, state)
+        if remaining:
+            event("state", "peer_outbox", "retained_after_queue_rotation")
+            raise Failure("alert_pending_retained_after_queue_rotation")
         event("state", "peer_outbox", "acknowledged")
 
 
