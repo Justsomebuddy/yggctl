@@ -3,6 +3,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import secrets
 import stat
@@ -847,6 +848,299 @@ def stats(ctx, hours=24, graph=False):
             )
             print("".join(marks))
             print("60 time bins: # observed up, . observed down, ? unknown; NOT RTT bars")
+
+
+# Degradation trend: evidence floors, not health claims. A drift smaller than its
+# threshold is reported as "stable" (no claim), and every verdict carries the
+# numbers it came from. The series identifies a peer by its displayed endpoint
+# only: Yggdrasil registers a link before the handshake, so an inbound peer's
+# source port is ephemeral and a restarted inbound peer starts a new series.
+TREND_MIN_SAMPLES = 8
+TREND_MIN_SPAN_MINUTES = 30
+TREND_RTT_FLOOR_MS = 5.0
+TREND_RTT_RATIO = 3.0
+TREND_AVAILABILITY_FLOOR = 10.0
+TREND_ERROR_FLOOR = 10.0
+TREND_PEER_COUNT_FLOOR = 1.0
+TREND_STALE_FACTOR = 3.0
+TREND_MAX_UNOBSERVED_SHARE = 4  # more than 1/4 of samples without observation: no trend
+
+
+# Deliberately not @logged: this predicate runs once per stored value (up to 10k
+# records x 6 fields), and the decorator emits two journal events per call. That
+# was 140k events and a third of the report's runtime; logging infrastructure in
+# core.py stays undecorated for the same reason.
+def trend_number(value):
+    """Finite non-negative number from untrusted stored JSON, otherwise None.
+
+    Stored history is not authenticated: a NaN/Infinity literal or a string in a
+    counter field must stay "not comparable" instead of poisoning the medians.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
+@logged
+def trend_halves(line):
+    """Oldest/newest halves; the middle sample of an odd series is dropped."""
+    half = len(line) // 2
+    if not half:
+        return [], []
+    return line[:half], line[-half:]
+
+
+@logged
+def trend_single(value):
+    """A one-element series for an already-aggregated per-half share."""
+    return [] if value is None else [value]
+
+
+@logged
+def trend_drift(before, after, floor, ratio=TREND_RTT_RATIO, worse_higher=True, counts=None):
+    """Median drift between halves against a MAD threshold; None if a half is empty.
+
+    `counts` reports the observations behind an already-aggregated metric, so a
+    share of one half does not claim a single sample.
+    """
+    if not before or not after:
+        return None
+    first, second = statistics.median(before), statistics.median(after)
+    delta = second - first
+    spread = statistics.median([abs(value - first) for value in before])
+    threshold = max(floor, ratio * spread)
+    if abs(delta) < threshold:
+        verdict = "stable"
+    elif (delta > 0) == worse_higher:
+        verdict = "degrading"
+    else:
+        verdict = "improving"
+    return {
+        "first": round(first, 3),
+        "second": round(second, 3),
+        "delta": round(delta, 3),
+        "threshold": round(threshold, 3),
+        "samples": list(counts) if counts else [len(before), len(after)],
+        "verdict": verdict,
+    }
+
+
+@logged
+def trend_peer_block(present, up, rtt, answered, unknown):
+    """Report block from per-half counters, so one pass and one API share the math.
+
+    `present`/`up` are per-half counts, `rtt` per-half lists, `answered` the samples
+    where the node replied and `unknown` the ones where it did not. Both shares divide
+    only by answered samples: an unavailable observation is "unknown", never "the peer
+    disappeared" (the collector records that case as an `errors` entry, so the outage is
+    reported on the error axis instead).
+
+    There is deliberately no "presence" metric. A configured peer keeps its row in
+    `getpeers` while it is down -- measured on the stand's own corpus, five dead peers
+    are five rows with `up:false` -- so "the row exists" would read ~100 % always and
+    would be a metric that looks important and says nothing. Disappearance of a *row*
+    happens only when the peer is removed from the configuration, which is an operator
+    action, not a link event. A lost peer therefore shows up as `availability` falling
+    to 0 %, which is exactly what this block reports.
+    """
+    return {
+        "availability": trend_drift(
+            trend_single(100.0 * up[0] / present[0] if present[0] else None),
+            trend_single(100.0 * up[1] / present[1] if present[1] else None),
+            TREND_AVAILABILITY_FLOOR,
+            worse_higher=False,
+            counts=present,
+        ),
+        "rtt_ms": trend_drift(rtt[0], rtt[1], TREND_RTT_FLOOR_MS),
+        "observed": list(present),
+        "unobserved": list(unknown),
+    }
+
+
+@logged
+def trend_peer(line, seen=None):
+    """Per-endpoint block for one series; `seen` marks samples the node answered."""
+    flags = [True] * len(line) if seen is None else list(seen)
+    present: list[int] = [0, 0]
+    up: list[int] = [0, 0]
+    rtt: list[list[float]] = [[], []]
+    answered: list[int] = [0, 0]
+    unknown: list[int] = [0, 0]
+    for side, (half, known) in enumerate(zip(trend_halves(line), trend_halves(flags))):
+        answered[side] = sum(1 for flag in known if flag)
+        unknown[side] = len(half) - answered[side]
+        for row, flag in zip(half, known):
+            if not flag or row is None:
+                continue
+            present[side] += 1
+            if row.get("up"):
+                up[side] += 1
+                latency = trend_number(row.get("rtt"))
+                if latency:
+                    rtt[side].append(latency)
+    return trend_peer_block(present, up, rtt, answered, unknown)
+
+
+@logged
+def trend(ctx, hours=24):
+    """Read-only degradation report over the metrics window; writes nothing.
+
+    One pass over the window: node and per-endpoint counters are accumulated together.
+    A per-name rescan of the samples was O(names x records) and made this the slowest
+    read path in the console (10k records: 2.4s against 0.2s for `stats`).
+    """
+    values, invalid = window(ctx, hours)
+    stamps = [at for at, _ in values]
+    span = (stamps[-1] - stamps[0]).total_seconds() / 60
+    intervals = [round((b - a).total_seconds() / 60) for a, b in zip(stamps, stamps[1:])]
+    cadence = int(statistics.median(intervals)) if intervals else None
+    age = (dt.datetime.now(dt.timezone.utc) - stamps[-1]).total_seconds() / 60
+    observed = sum(1 for _, row in values if row.get("peers_observed") is True)
+    report = {
+        "window_hours": hours,
+        "samples": len(values),
+        "invalid_records": invalid,
+        "span_minutes": round(span, 1),
+        "sampling_minutes": cadence,
+        "collector_age_minutes": round(age, 1),
+        "observed_samples": observed,
+        "unobserved_samples": len(values) - observed,
+        "peer_identity": "endpoint_not_key",
+        "collector": "stale",
+        "verdict": "insufficient_history",
+        "reasons": [],
+        "node": {},
+        "peers": [],
+    }
+    if age > max(10.0, TREND_STALE_FACTOR * (cadence or 1)):
+        report["reasons"].append("collector_stale_beyond_sampling_interval")
+    else:
+        report["collector"] = "fresh"
+    if len(values) < TREND_MIN_SAMPLES:
+        report["reasons"].append(f"fewer_than_{TREND_MIN_SAMPLES}_samples")
+    if span < TREND_MIN_SPAN_MINUTES:
+        report["reasons"].append(f"span_below_{TREND_MIN_SPAN_MINUTES}_minutes")
+    if not observed:
+        report["reasons"].append("no_observed_samples")
+    elif observed * TREND_MAX_UNOBSERVED_SHARE < len(values) * (TREND_MAX_UNOBSERVED_SHARE - 1):
+        report["reasons"].append(f"unobserved_above_{100 // TREND_MAX_UNOBSERVED_SHARE}_percent")
+    half = len(values) // 2
+    newer = len(values) - half
+    node_up: list[list[float]] = [[], []]
+    node_fail: list[list[float]] = [[], []]
+    present: dict[str, list[int]] = {}
+    up: dict[str, list[int]] = {}
+    rtt: dict[str, list[list[float]]] = {}
+    answered: list[int] = [0, 0]
+    unknown: list[int] = [0, 0]
+    labels: dict[str, str] = {}
+    for position, (_, row) in enumerate(values):
+        side = 0 if position < half else 1 if position >= newer else -1
+        if side < 0:
+            continue
+        # The error share is taken over every sample: an unavailable observation is
+        # an error signal, so it must not disappear together with the peer series.
+        node_fail[side].append(1.0 if row.get("errors") else 0.0)
+        if row.get("peers_observed") is not True:
+            unknown[side] += 1
+            continue
+        answered[side] += 1
+        count = trend_number(row.get("up"))
+        if count is not None:
+            node_up[side].append(count)
+        named: dict[str, dict[str, Any]] = {}
+        for entry in row.get("peers") or []:
+            if not isinstance(entry, dict):
+                continue
+            raw = entry.get("r")
+            if isinstance(raw, str):
+                if raw not in labels:
+                    labels[raw] = peer_label(raw)
+                name = labels[raw]
+            else:
+                name = peer_label(raw)
+            named.setdefault(name, entry)
+        for name, entry in named.items():
+            if name not in present:
+                present[name], up[name], rtt[name] = [0, 0], [0, 0], [[], []]
+            present[name][side] += 1
+            if entry.get("up"):
+                up[name][side] += 1
+                latency = trend_number(entry.get("rtt"))
+                if latency:
+                    rtt[name][side].append(latency)
+    failures = [100.0 * sum(half) / len(half) if half else None for half in node_fail]
+    report["node"] = {
+        "up_peers": trend_drift(
+            node_up[0],
+            node_up[1],
+            TREND_PEER_COUNT_FLOOR,
+            worse_higher=False,
+            counts=[len(node_up[0]), len(node_up[1])],
+        ),
+        "error_rate": trend_drift(
+            trend_single(failures[0]),
+            trend_single(failures[1]),
+            TREND_ERROR_FLOOR,
+            counts=[len(node_fail[0]), len(node_fail[1])],
+        ),
+    }
+    for name in sorted(present):
+        detail = trend_peer_block(present[name], up[name], rtt[name], answered, unknown)
+        detail["peer"] = name
+        report["peers"].append(detail)
+    drifts = [report["node"]["up_peers"], report["node"]["error_rate"]]
+    drifts.extend(item["availability"] for item in report["peers"])
+    drifts.extend(item["rtt_ms"] for item in report["peers"])
+    verdicts = [item["verdict"] for item in drifts if item is not None]
+    if report["reasons"]:
+        report["verdict"] = "insufficient_history"
+    elif "degrading" in verdicts:
+        report["verdict"] = "degrading"
+    elif "improving" in verdicts:
+        report["verdict"] = "improving"
+    else:
+        report["verdict"] = "stable"
+    return report
+
+
+@logged
+def trend_line(detail):
+    """One comparable line per metric: numbers, threshold and the verdict itself."""
+    if detail is None:
+        return "not_comparable (one half has no samples)"
+    return (
+        f"{detail['first']} -> {detail['second']} delta={detail['delta']} "
+        f"threshold={detail['threshold']} n={detail['samples'][0]}/{detail['samples'][1]} "
+        f"verdict={detail['verdict']}"
+    )
+
+
+@logged
+def trend_text(report):
+    """Deterministic text projection of a trend report (JSON stays available)."""
+    lines = [
+        f"window={report['window_hours']}h samples={report['samples']} "
+        f"observed={report['observed_samples']} unobserved={report['unobserved_samples']} "
+        f"invalid_records={report['invalid_records']} span={report['span_minutes']}min "
+        f"sampling={report['sampling_minutes']}min "
+        f"collector_age={report['collector_age_minutes']}min collector={report['collector']}",
+        f"peer_identity={report['peer_identity']} (an inbound peer's source port is "
+        f"ephemeral; a restarted inbound peer starts a new series)",
+        f"node up_peers: {trend_line(report['node']['up_peers'])}",
+        f"node error_rate%: {trend_line(report['node']['error_rate'])}",
+    ]
+    for peer in report["peers"]:
+        lines.append(f"{peer['peer']}: availability% {trend_line(peer['availability'])}")
+        lines.append(f"{peer['peer']}: rtt_ms {trend_line(peer['rtt_ms'])}")
+    if report["reasons"]:
+        lines.append(f"trend={report['verdict']} reasons={','.join(report['reasons'])}")
+    else:
+        lines.append(f"trend={report['verdict']}")
+    lines.append("medians of two halves with a MAD threshold; NOT link health and not a gate")
+    return lines
 
 
 @logged

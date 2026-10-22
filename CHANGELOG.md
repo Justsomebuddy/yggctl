@@ -53,6 +53,37 @@ Publication does not modify installed files, services, policy or alert profiles.
 
 ## Earlier source history
 
+### Unreleased — degradation trend (`trend`)
+
+- New read-only command `trend [1..72 hours] [json]`: compares the older and the
+  newer half of the metrics window by median, with a MAD-derived threshold, for
+  node up-peer count, degraded-sample share, and per-endpoint availability and RTT.
+- There is no "presence" metric: a configured peer keeps its row in `getpeers`
+  while it is down (measured: five dead peers are five rows with `up:false`), so
+  "the row exists" would read ~100 % always. A lost peer is visible as
+  `availability` falling to 0 %, which is what the report shows.
+- Verdicts are `stable` / `improving` / `degrading`, or `insufficient_history`
+  with explicit reasons (fewer than 8 samples, span below 30 minutes, no observed
+  samples, or more than a quarter of the window without any observation).
+  Collector freshness is reported separately (`fresh`/`stale`).
+- An unavailable node observation is never read as "the peer disappeared":
+  `availability` divides only by samples the node actually answered, and the
+  unobserved count is reported. The outage itself surfaces on the error axis,
+  which is taken over every sample.
+- Peer identity in the report is the displayed endpoint, not a verified key: an
+  inbound peer's source port is ephemeral, so a restarted inbound peer starts a
+  new series. The report states this instead of inferring identity.
+- Non-finite or non-numeric stored counters stay "not comparable", so no
+  NaN/Infinity reaches the JSON output (same class as #23).
+- No existing command, output, schema, verdict, exit code or write path changes;
+  `metrics.jsonl` is only read, and `trend` needs no sudo when the file is readable.
+  One fused pass over the window: the first draft re-scanned every sample per peer
+  name (2.38 s on a 10 000-record file, against 0.19 s for `stats`), and a per-value
+  `@logged` helper emitted two journal events per call (70k calls, 140k events).
+  After caching labels and keeping logging out of the per-value path the report
+  costs 0.021 s for 24 h, 0.067 s at the `72` hour maximum (4 320 records) and
+  0.156 s on 10 000 records -- the same order as `stats`, which shares the read.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;

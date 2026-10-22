@@ -112,3 +112,16 @@ automatic rollback, and no queue/cursor reset is authorized by this contract.
 Source 5.10.0 raw-peer checks have both named-consumer regressions and an inventory
 guard for new direct literal `up` reads. The guard permits reviewed schema and
 historical projections; it is not a blanket ban or a data-flow proof.
+## Degradation trend (unreleased; feature)
+
+| ID | Invocation/path | Expected result / failure |
+|---|---|---|
+| CLI-TREND | `trend [1..72 hours] [json]` | Read-only report over `metrics.jsonl`: medians of the older/newer halves of the window against a MAD threshold, for node up-peer count, degraded-sample share and per-endpoint availability/RTT. Verdict `stable`/`improving`/`degrading`, or `insufficient_history` with explicit reasons (too few samples, span < 30 min, no observed samples). |
+| CLI-TREND-LIMIT | Fewer than 8 samples, span < 30 min, no observed sample, more than a quarter of the window unobserved, or a `collector_stale` age beyond 3 sampling intervals | `insufficient_history` with reasons; never a healthy verdict. Staleness is reported on a separate axis (`collector=fresh/stale`). |
+| CLI-TREND-UNKNOWN | `peers_observed=false` samples (node API unavailable) | Never counted as a missing peer: `availability` divides only by answered samples and the unobserved count is reported; a peer half without observations renders `not_comparable`. The outage surfaces as `error_rate`, which is taken over every sample. |
+| CLI-TREND-DOWN | A peer row stays in `getpeers` with `up:false` (dead peers are still listed) | `availability` falls to 0 % and that peer's verdict is `degrading`. No "presence" metric exists on purpose: the row does not disappear, so such a metric would always read ~100 %. |
+| CLI-TREND-INPUT | Stored history only | Non-finite/non-numeric counters become "not comparable" (no NaN/Infinity in output); unknown or credential-bearing peer strings re-apply `peer_label`. No file is written and no admin query is made. |
+
+Peer identity is the displayed endpoint, not a verified key: an inbound peer's
+source port is ephemeral, so a restarted inbound peer starts a new series. This
+is a report, not a gate: it changes no existing command, verdict or exit code.
