@@ -64,6 +64,56 @@ Do not delete ambiguous intents to unblock a queue: an operator must investigate
 native/transport evidence and explicitly accept any new-event/resend risk.
 No automatic ambiguity-resolution or journal rollover command is implemented.
 
+## Queue retention visibility
+
+`alerts.jsonl` remains a bounded newest-suffix queue, not an indefinite durable
+delivery spool. Appends compact at more than 1,200 rows to at most 1,000 rows,
+or earlier when the 32 MiB byte limit requires it. Producer acknowledgement
+means the event was queued at that time; it does not pin the event against
+later retention. A long sender outage can therefore outlast queue retention.
+
+When compaction removes ordinary records whose IDs lack a checkpoint in
+`alerts-forwarded.json`, it increments `evicted_uncheckpointed_total` in a
+reserved `ygg-queue-retention` metadata row. The metadata and retained suffix
+are written in the **same atomic replacement**, not as two separate state files.
+The row survives later compaction and occupies one of the retained slots:
+after loss, a 1,000-row compacted queue holds at most 999 ordinary alerts.
+Its maximum encoded size is reserved before selecting the byte-bounded suffix.
+Invalid/duplicate metadata, a corrupt cursor, counter overflow or insufficient
+space for the new record plus metadata abort compaction without replacement.
+An append already fsynced before a count-triggered compaction failure remains
+on disk; the command still fails visibly.
+
+The count describes **eviction occurrences without a current local checkpoint**,
+not distinct permanently lost messages. A pending producer replay can reinsert
+and later evict the same ID again. An ambiguous sender attempt may have reached
+the native profile without a cursor checkpoint. Legacy/first-run cursor entries
+remain historical skip boundaries, not retroactive proof of delivery. Deletions
+before this accounting was installed cannot be reconstructed. Deleting, rolling
+back or restoring inconsistent state can invalidate the count.
+
+The forwarder prints the cumulative value before processing and in its final
+summary, including first-run initialization and an empty backlog. For example:
+
+```text
+remaining=0 evicted_uncheckpointed_total=202
+```
+
+This means the retained backlog is drained, while 202 record evictions were
+observed without checkpoints. Automation must inspect both fields; an increase
+in the cumulative count is the signal for new evictions. A historical nonzero
+count alone does not force an error exit and an endless `Restart=on-failure`
+loop. Forwarding errors and pending backlog retain their existing failure exits.
+The metadata is local only: it is never handed to SimpleX, added to the cursor,
+or counted against the 2,000-entry native attempt journal. External monitoring
+must collect the command output if remote notification of retention is needed.
+Do not downgrade to an older reader while retaining this new metadata format:
+an older forwarder does not know it is metadata and may send a generic alert,
+and older compaction can discard the counter. This source change does not
+update an installation, external monitoring or integrity manifest.
+
+## Historical state and delivery limits
+
 Existing legacy cursor entries/first-run history boundary are preserved, NOT
 retroactively verified or resent. Historical process-only checkpoints do not
 become native receipts. The journal is not an adversarial-profile/compromised-root

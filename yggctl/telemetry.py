@@ -126,6 +126,9 @@ def metric_compact(ctx, name, row, keep, appended=False):
     values = rows(ctx, name)
     if appended:
         values = values[:-1]
+    if name == "alerts.jsonl":
+        compact_alerts(ctx, values, row, keep)
+        return
     retained, size = [line], len(line)
     for previous in reversed(values[-(keep - 1) :] if keep > 1 else []):
         encoded = (json.dumps(previous, separators=(",", ":")) + "\n").encode()
@@ -137,11 +140,115 @@ def metric_compact(ctx, name, row, keep, appended=False):
     event("state", "metric_append", "compacted_by_byte_or_record_bound")
 
 
+ALERT_RETENTION_KIND = "ygg-queue-retention"
+ALERT_RETENTION_MAX = (1 << 63) - 1
+ALERT_RETENTION_ID = "ygg-queue-retention"
+
+
+@logged
+def alert_retention(records):
+    """Separate the one durable queue-loss marker from ordinary alerts."""
+    notice = None
+    ordinary = []
+    for item in records:
+        if item.get("kind") != ALERT_RETENTION_KIND:
+            ordinary.append(item)
+            continue
+        if notice is not None or set(item) != {"kind", "id", "evicted_uncheckpointed_total"}:
+            raise Failure("alert_retention_invalid")
+        total = item["evicted_uncheckpointed_total"]
+        if type(total) is not int or not 1 <= total <= ALERT_RETENTION_MAX:
+            raise Failure("alert_retention_invalid")
+        alert_id(item)
+        notice = item
+    return notice, ordinary
+
+
+@logged
+def forwarded_ids(ctx):
+    """Read the existing cursor format; absence is not a delivery checkpoint."""
+    raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
+    if raw is None:
+        return None
+    try:
+        sent = json.loads(raw)["sent"]
+        if (
+            not isinstance(sent, list)
+            or len(sent) > 2000
+            or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
+            or len(set(sent)) != len(sent)
+        ):
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise Failure("alerts_forwarded_state_invalid") from None
+    return sent
+
+
+@logged
+def alert_suffix(encoded, capacity, byte_budget):
+    """Find the newest complete suffix within both queue limits."""
+    used = 0
+    start = len(encoded)
+    while start > 0 and len(encoded) - start < capacity:
+        size = len(encoded[start - 1])
+        if used + size > byte_budget:
+            break
+        used += size
+        start -= 1
+    return start
+
+
+@logged
+def compact_alerts(ctx, values, row, keep):
+    """Atomically retain a bounded suffix and cumulative uncheckpointed evictions."""
+    if row.get("kind") == ALERT_RETENTION_KIND:
+        raise Failure("alert_retention_reserved")
+    previous, ordinary = alert_retention(values)
+    ordinary.append(row)
+    encoded = [(json.dumps(item, separators=(",", ":")) + "\n").encode() for item in ordinary]
+    sent = set(forwarded_ids(ctx) or ())
+
+    start = alert_suffix(encoded, keep, METRICS_LIMIT)
+    initial_evictions = sum(alert_id(item) not in sent for item in ordinary[:start])
+    if previous is None and not initial_evictions:
+        atomic(ctx.p.state / "alerts.jsonl", b"".join(encoded[start:]), 0o640)
+        event("state", "metric_append", "compacted_by_byte_or_record_bound")
+        return
+
+    old_total = previous["evicted_uncheckpointed_total"] if previous else 0
+    # Reserve the largest possible marker first, so the suffix and count are
+    # selected once even when the counter crosses a decimal digit boundary.
+    maximal = {
+        "kind": ALERT_RETENTION_KIND,
+        "id": ALERT_RETENTION_ID,
+        "evicted_uncheckpointed_total": ALERT_RETENTION_MAX,
+    }
+    reserved = len((json.dumps(maximal, separators=(",", ":")) + "\n").encode())
+    if reserved + len(encoded[-1]) > METRICS_LIMIT:
+        raise Failure("alert_retention_capacity")
+    start = alert_suffix(encoded, keep - 1, METRICS_LIMIT - reserved)
+    if start == len(encoded):
+        raise Failure("alert_retention_capacity")
+    total = old_total + sum(alert_id(item) not in sent for item in ordinary[:start])
+    if total > ALERT_RETENTION_MAX:
+        raise Failure("alert_retention_overflow")
+    notice = {
+        "kind": ALERT_RETENTION_KIND,
+        "id": ALERT_RETENTION_ID,
+        "evicted_uncheckpointed_total": total,
+    }
+    marker = (json.dumps(notice, separators=(",", ":")) + "\n").encode()
+    atomic(ctx.p.state / "alerts.jsonl", marker + b"".join(encoded[start:]), 0o640)
+    event("state", "metric_append", "compacted_by_byte_or_record_bound")
+
+
 @logged
 def append(ctx, name, row, keep=METRIC_RETENTION):
     """Retain a newest suffix within 32 MiB; compact count at >120% of keep."""
     if type(keep) is not int or not 1 <= keep <= METRIC_RETENTION:
         raise Failure("invalid_metric_retention")
+    if name == "alerts.jsonl" and row.get("kind") == ALERT_RETENTION_KIND:
+        raise Failure("alert_retention_reserved")
     path = ctx.p.state / name
     line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
     if len(line) > METRICS_LIMIT:
@@ -549,10 +656,12 @@ def forward(ctx):
     deadline = start + FORWARD_BUDGET
     ctx.root()
     with ctx.locked():
-        alerts = rows(ctx, "alerts.jsonl")
+        notice, alerts = alert_retention(rows(ctx, "alerts.jsonl"))
+        evicted = notice["evicted_uncheckpointed_total"] if notice else 0
+        print(f"alert queue retention: evicted_uncheckpointed_total={evicted}", flush=True)
         ids = [alert_id(a) for a in alerts]
-        raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
-        if raw is None:
+        sent = forwarded_ids(ctx)
+        if sent is None:
             atomic(
                 ctx.p.state / "alerts-forwarded.json",
                 json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n",
@@ -560,20 +669,10 @@ def forward(ctx):
             )
             print(
                 f"[1/1] forwarding initialised; processed={len(ids)} earlier alerts not sent; errors=0 "
-                f"remaining=0 elapsed={time.monotonic() - start:.2f}s"
+                f"remaining=0 evicted_uncheckpointed_total={evicted} "
+                f"elapsed={time.monotonic() - start:.2f}s"
             )
             return
-        try:
-            sent = json.loads(raw)["sent"]
-            if (
-                not isinstance(sent, list)
-                or len(sent) > 2000
-                or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
-                or len(set(sent)) != len(sent)
-            ):
-                raise ValueError
-        except (ValueError, KeyError, TypeError):
-            raise Failure("alerts_forwarded_state_invalid") from None
         done, failures, processed = set(sent), 0, 0
         pending = [(a, aid) for a, aid in zip(alerts, ids) if aid not in done]
         for alert, aid in pending:
@@ -611,6 +710,7 @@ def forward(ctx):
         left = sum(aid not in done for aid in set(ids))
         print(
             f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
+            f"evicted_uncheckpointed_total={evicted} "
             f"elapsed={time.monotonic() - start:.2f}s; native local recording is NOT delivery/human ACK"
         )
         if failures:

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Alert retention visibility
+
+- Keep a cumulative count of queue records evicted without a local forwarding
+  checkpoint, atomically with the bounded retained queue. The forwarder's output
+  exposes this count across restarts, including when `remaining=0`.
+- Reserve one queue slot for local metadata after the first such eviction;
+  do not send it through SimpleX or consume native attempt-journal capacity.
+  This accounts for eviction occurrences, not unique lost messages or delivery.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;

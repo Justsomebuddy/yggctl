@@ -187,6 +187,63 @@ class NativeSender(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     @logged
+    def test_retention_notice_survives_native_handoff_and_restart_without_send(self):
+        atomic(self.p.state / "alerts-forwarded.json", '{"sent":[]}\n')
+        atomic(
+            self.p.state / "alerts.jsonl",
+            "".join(
+                json.dumps({"id": f"a{i}", "kind": "labelled-local-selftest"}) + "\n"
+                for i in range(6)
+            ),
+            0o640,
+        )
+        tm.append(
+            self.ctx,
+            "alerts.jsonl",
+            {"id": "a6", "kind": "labelled-local-selftest"},
+            keep=5,
+        )
+        notice, ordinary = tm.alert_retention(tm.rows(self.ctx, "alerts.jsonl"))
+        self.assertEqual(notice["evicted_uncheckpointed_total"], 3)
+        self.assertEqual([row["id"] for row in ordinary], ["a3", "a4", "a5", "a6"])
+
+        # The shared native fixture normally expects one fixed event ID. Select
+        # its sole current attempted entry so the same real SQLite adapter can
+        # verify four distinct queue IDs without mocking handoff.
+        def attempted_key(event="event"):
+            return next(
+                key
+                for key, item in sender.load_journal(self.ctx).items()
+                if item["status"] == "attempted"
+            )
+
+        with patch.object(self, "key", side_effect=attempted_key):
+            tm.forward(self.ctx)
+
+        expected_ids = ["a3", "a4", "a5", "a6"]
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(
+            json.loads((self.p.state / "alerts-forwarded.json").read_bytes()),
+            {"sent": expected_ids},
+        )
+        journal = sender.load_journal(self.ctx)
+        self.assertEqual(
+            set(journal), {hashlib.sha256(a.encode()).hexdigest() for a in expected_ids}
+        )
+        self.assertTrue(all(item["status"] == "native-recorded" for item in journal.values()))
+        with contextlib.closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM chat_items").fetchone()[0], 4)
+
+        self.output.seek(0)
+        self.output.truncate(0)
+        fresh = core.Context(self.p, runner=self.native, require_root=False)
+        tm.forward(fresh)
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(sender.load_journal(fresh)), 4)
+        self.assertIn("evicted_uncheckpointed_total=3", self.output.getvalue())
+        self.assertIn("remaining=0", self.output.getvalue())
+
+    @logged
     def test_native_accept_then_timeout_is_checkpointed_once_and_replay_recovers(self):
         self.mode = "accepted-timeout"
         self.assertEqual(self.call(), 1)
