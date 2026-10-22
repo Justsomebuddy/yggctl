@@ -135,6 +135,11 @@ class IdentityFreshnessContract(ConsoleFixture):
             "research/model.py:project": 2,  # Typed transport projection.
             "research/model.py:graph": 1,  # Keyless rows excluded separately.
             "research/model.py:peer_link_groups": 1,  # Keyless rows excluded.
+            # `trend` reports a historical median of the projected `up` field; it makes no
+            # liveness claim and does not feed a gate. Strict projected bool checks
+            # are not raw availability/key identity claims.
+            "telemetry.py:trend": 3,
+            "telemetry.py:trend_peer": 2,
         }
         root = Path(checks.__file__).parent
         found: Counter[str] = Counter()

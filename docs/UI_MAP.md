@@ -114,3 +114,22 @@ automatic rollback, and no queue/cursor reset is authorized by this contract.
 Source 5.10.0 raw-peer checks have both named-consumer regressions and an inventory
 guard for new direct literal `up` reads. The guard permits reviewed schema and
 historical projections; it is not a blanket ban or a data-flow proof.
+## Stored-history trend (5.11.0)
+
+| ID | Invocation / precondition | Visible result / side effects | Error / interpretation limit |
+|---|---|---|---|
+| CLI-TREND | `trend [hours] [json]`; default 24, integer 1..72 | Text or JSON report; no API request or file write; existing gates/alerts unchanged | `json` must be last; duplicate hours/format or out-of-range arguments fail. File must be readable; otherwise existing privilege check applies. |
+| CLI-TREND-SPLIT | Bounded `metrics.jsonl` window | Sort timestamps; equal oldest/newest **sample-count** halves; drop odd middle row; median/MAD comparisons | Not equal elapsed-time halves, time-weighted uptime, statistical confidence or a live health gate. Duplicate rows still weight metrics; distinct timestamp count is shown. |
+| CLI-TREND-LIMIT | Fewer than 8 distinct timestamps, span <30 min, no observed sample, >25% unknown observations, stale collector, malformed peer container, or no comparable observed metric | Aggregate `insufficient_history` with explicit reasons; individual metric detail retained | Error-free sample share alone cannot establish stable observed connectivity. No samples in the window remains the existing controlled failure. |
+| CLI-TREND-FUTURE | Any valid future timestamp in the same bounded history snapshot | `future_samples` count, `collector=future_timestamp`, `future_samples_present`; aggregate insufficient | Future samples excluded from metric window, not silently accepted as fresh evidence. Future-only history cannot yield a report. No second history read. |
+| CLI-TREND-COLLECTOR | Valid in-window timestamp series | `collector=fresh/stale`, latest age and median positive-interval cadence | Stale beyond max(10 minutes, 3×cadence). Fresh is relative to stored timestamps, not an authenticated collector health claim. |
+| CLI-TREND-OBSERVATION | Exact `peers_observed=true` | Per-half `answered` counts; unavailable samples counted `unobserved`; error share covers all selected samples | An unavailable observation is not an invented absent/down peer. A half without known evidence is `not_comparable`. |
+| CLI-TREND-AVAILABILITY | Projected endpoint rows with strict boolean `up` | Availability = true / present known-state rows; expose `present`, `answered`, `absent`, `invalid_states`, `observed`, `unobserved` | Absent rows are not down; integers/truthy strings are invalid states. This conditional sample share is not whole-window uptime or raw API/key proof. |
+| CLI-TREND-RTT | Strict-true projected peer row, finite nonnegative RTT | Keep zero values; `rtt_ms` compares protocol router-response EWMA | JSON/text explicitly distinguish EWMA from link/application delay; missing/invalid RTT is not comparable, not fabricated zero. |
+| CLI-TREND-NUMERIC | Untrusted history values including huge integers | Finite nonnegative values only; missing metric is null plus explicit `not_comparable` reason; rejection totals logged/reported | Arithmetic overflow has explicit `arithmetic_overflow`, not silent saturation/NaN/Infinity. No automatic rewrite/delete of history. |
+| CLI-TREND-IDENTITY | Sanitized displayed endpoint labels | `peer_identity=endpoint_not_key`, label policy shown; first row per shown label/sample wins | Port changes split a series; unknown/sanitized-colliding labels can merge origins. Not stable per-link or verified peer identity. |
+| CLI-TREND-TRUST | Every generated text/JSON report | Generated `provenance.status=unverified_role_writable_history`, auth/immutability false and visible warning | Role-writable local history has no origin/authenticity/immutability/signature/API-truth guarantee. File contents cannot grant trusted provenance. |
+
+Existing stats/graph behavior and history schema are unchanged. Source tests use
+synthetic fixtures; they do not verify external network-stand, performance,
+installed-runtime or upstream measurement claims. See [release scope](RELEASE-5.11.0.md).

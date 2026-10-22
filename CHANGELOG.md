@@ -1,5 +1,27 @@
 # Changelog
 
+## [5.11.0] - 2026-10-22
+
+- Add read-only `trend [hours] [json]` over bounded stored metrics (#42/#43).
+  Compare equal sample-count halves (drop an odd middle row), not elapsed-time
+  halves, with median/MAD policy thresholds for node counts, error share and
+  per-endpoint conditional availability/router-response RTT EWMA.
+- Expose present/answered/absent/invalid-state counts, strict projected boolean
+  states and observation gaps; do not infer raw-key identity or absent-is-down.
+  Count distinct timestamps for the minimum evidence requirement. Future samples,
+  stale/short/sparse evidence, malformed peer containers and no comparable
+  observed metric cannot produce an aggregate healthy-looking verdict.
+- Validate huge integers/nonfinite values safely; overflowed arithmetic is
+  explicitly `not_comparable`, never a nonfinite JSON value or silent clamp.
+  Batch-local rejection counts preserve diagnostic logging without per-value
+  event flooding or global trace switches. Keep zero RTT observations.
+- Generate visible JSON/text warnings: history is role-writable, unverified and
+  unauthenticated; no origin, immutability, API-truth or live-health guarantee.
+  Document privacy-label collisions, count-weighted heuristics and strict CLI
+  argument order. Existing deployment/migration boundaries remain unchanged.
+- See [scope and qualification](docs/RELEASE-5.11.0.md). Supplied network-stand
+  and timing claims are not independently verified source evidence.
+
 ## [5.10.0] - 2026-10-22
 
 - Compose #13/#14/#39: preserve fresh observations after replay failure,
@@ -198,5 +220,5 @@ Publication does not modify installed files, services, policy or alert profiles.
 - Document GitHub Issues and pull requests as the contribution/reporting route,
   with synthetic reproducers and no disclosure of operational secrets.
 
-The current source version is 5.10.0; this source repository does not change installed files or running nodes.
+The current source version is 5.11.0; this source repository does not change installed files or running nodes.
 No stable release, generic installer or live deployment is claimed.
