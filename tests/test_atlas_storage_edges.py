@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import tracemalloc
 import zipfile
 
 from core import Failure, atomic, logged
@@ -117,6 +118,71 @@ class AtlasStorageEdges(ObservedFixture):
                 cat.repository_rows(self.zip_bytes(records), SHA)
         with self.assertRaisesRegex(Failure, "empty_catalogue_archive"):
             cat.repository_rows(self.zip_bytes([(prefix + "BAD.md", "text")]), SHA)
+
+    @logged
+    def lying_zip_bytes(self, declared, expanded):
+        """One deflate member whose central-directory size under-declares the stream."""
+        import binascii
+        import struct
+        import zlib
+
+        head = b"`tls://host.test:443?key=" + b"0" * 64 + b"`\n"
+        compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
+        packed = bytearray(compressor.compress(head))
+        filler = b"\0" * (1 << 20)
+        fed = len(head)
+        while fed < expanded:
+            packed += compressor.compress(filler)
+            fed += len(filler)
+        packed += compressor.flush()
+        crc = binascii.crc32(head + b"\0" * (declared - len(head)))
+        name = ("public-peers-" + SHA + "/region/lying.md").encode()
+        local = (
+            struct.pack(
+                "<IHHHHHIIIHH", 0x04034B50, 20, 0, 8, 0, 0, crc, len(packed), declared, len(name), 0
+            )
+            + name
+        )
+        central = (
+            struct.pack(
+                "<IHHHHHHIIIHHHHHII",
+                0x02014B50,
+                20,
+                20,
+                0,
+                8,
+                0,
+                0,
+                crc,
+                len(packed),
+                declared,
+                len(name),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            + name
+        )
+        end = struct.pack(
+            "<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), len(local) + len(packed), 0
+        )
+        return local + bytes(packed) + central + end
+
+    @logged
+    def test_catalogue_declared_size_cannot_hide_inflated_bytes(self):
+        # A member may under-declare its size; the point is that reading it must not
+        # inflate the whole deflate stream into memory (ZipFile.read() did).
+        payload = self.lying_zip_bytes(1024 * 1024, 8 * 1024 * 1024)
+        tracemalloc.start()
+        try:
+            cat.repository_rows(payload, SHA)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 * 1024 * 1024)
 
     @logged
     def test_monitor_invalid_country_unknown_fields_and_cap(self):

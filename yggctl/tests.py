@@ -1212,9 +1212,16 @@ class ConsoleTests(ConsoleFixture):
             inside, outside = Path(d) / "inside", Path(d) / "outside"
             inside.write_text("0::/system.slice/yggctl-sandbox-atlas-1a2b3c4d.service\n")
             outside.write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+            forged = Path(d) / "forged"
+            forged.write_text(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                "yggctl-sandbox-atlas-1a2b3c4d.service\n"
+            )
             self.assertEqual(sandbox.own_unit(str(inside)), ("atlas", "1a2b3c4d"))
             self.assertTrue(sandbox.inside(str(inside)))
             self.assertFalse(sandbox.inside(str(outside)))
+            self.assertIsNone(sandbox.own_unit(str(forged)))
+            self.assertFalse(sandbox.inside(str(forged)))
             self.assertFalse(sandbox.inside(str(Path(d) / "missing")))
 
     @logged
@@ -1729,7 +1736,7 @@ class ConsoleTests(ConsoleFixture):
     @logged
     def test_watch_transient_failure_keeps_unknown_and_continues(self):
         out = io.StringIO()
-        ps = [{"up": True}]
+        ps = [{"up": True, "key": "1" * 64}]
         with (
             patch("telemetry.peers", side_effect=[Failure("synthetic"), ps, ps, ps, ps]),
             patch("telemetry.time.sleep") as sleep,
@@ -1744,7 +1751,10 @@ class ConsoleTests(ConsoleFixture):
 
     @logged
     def test_wait_peers_respects_desired_and_paired_health(self):
-        up = [{"remote": URI.replace("192.0.2.1", f"192.0.2.{i}"), "up": True} for i in (1, 2)]
+        up = [
+            {"remote": URI.replace("192.0.2.1", f"192.0.2.{i}"), "up": True, "key": "1" * 64}
+            for i in (1, 2)
+        ]
         desired = "192.0.2.1:443"
         with patch("management.peers", return_value=up):
             management.wait_peers(self.ctx, desired, seconds=0)

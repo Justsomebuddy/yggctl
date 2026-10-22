@@ -31,6 +31,7 @@ class AlertOutboxTests(ConsoleFixture):
                 "up": n != 1,
                 "inbound": False,
                 "latency": 1000000,
+                "key": f"{n:064x}",
             }
             for n in (1, 2, 3)
         ]

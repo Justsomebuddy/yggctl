@@ -152,11 +152,21 @@ def repository_rows(payload, commit):
                     continue
                 if not re.fullmatch(r"[a-z-]+/[a-z-]+\.md", "/".join(parts[1:])):
                     continue
-                total += item.file_size
-                if item.file_size > 1024 * 1024 or total > 8 * 1024 * 1024:
+                if item.file_size > 1024 * 1024:
                     raise Failure("atlas_catalogue_decompression_limit")
                 region = country(parts[-1][:-3])
-                body = archive.read(item).decode("utf-8")
+                # Count the bytes actually inflated. ZipFile.read() inflates the whole
+                # deflate stream before truncating to the declared size, so a member
+                # that under-declares its size could allocate gigabytes inside the limit.
+                chunks, size = [], 0
+                with archive.open(item) as member:
+                    while chunk := member.read(1 << 16):
+                        size += len(chunk)
+                        if total + size > 8 * 1024 * 1024:
+                            raise Failure("atlas_catalogue_decompression_limit")
+                        chunks.append(chunk)
+                total += size
+                body = b"".join(chunks).decode("utf-8")
                 for uri in re.findall(r"`((?:tcp|tls|quic|ws|wss)://[^`\s]+)`", body):
                     if len(records) >= 10000:
                         raise Failure("atlas_catalogue_record_limit")

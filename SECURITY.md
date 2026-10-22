@@ -36,9 +36,12 @@ normal delivery and must preserve stable IDs and acknowledgement state.
 
 ## Worker identity and archive resource limits
 
-Worker roles share one OS identity. Broker UID authentication does not establish
-per-worker-instance or mutually compromised-worker isolation; see the explicit
-[trust contract](docs/SECURITY.md#worker-trust-principal-source-578-issue-7).
+Roles use distinct provisioned OS identities plus kernel UID/PID and expected
+unit admission. Instances of one role still share their principal and store;
+there is no per-launch historical-data isolation or general mutually compromised
+worker guarantee. Exact unified `/system.slice` matching is necessary cgroup
+recognition, not a replacement for broker admission. See the explicit
+[trust contract](docs/SECURITY.md#worker-principals-580-7).
 
 Structural backup preview accepts at most 4 MiB compressed, **8 MiB in total
 decompressed TAR bytes**, and 1 MiB per regular member. The aggregate limit is
@@ -47,3 +50,34 @@ gzip streams and trailing data. An over-budget input fails with
 `backup_expansion_limit`; corrupted/truncated gzip is rejected. This is an input
 byte budget, not a promised whole-process RSS/CPU limit or archive authentication.
 Previously created oversized archives may now be refused; `--apply` stays disabled.
+
+Atlas repository ZIP parsing also streams member data with bounded reads and an
+8 MiB aggregate library-delivered-byte budget. This does not independently attest
+all hidden compressed-stream bytes, bound whole-process RSS or authenticate an
+archive. A crafted-response test is not evidence of a remote-peer exploit or
+TLS verification bypass.
+
+## Source 5.10.0 trust and recovery boundaries
+
+Research capture/map/diff/report outputs visibly declare
+`unverified_role_writable_history`, `authenticated=false` and
+`immutable_since_capture=false`. The reader constructs the warning; it is not
+accepted from a stored snapshot. Schema validation, `sources=ok` and
+`identity_stable=true` do not verify origin, unchanged history or API truth.
+A store owner can fabricate structurally valid history. No signatures, separate
+attestation principal or authenticity/immutability guarantee is implemented.
+
+Writer-owned directory locking protects cooperative Research writers and orphan
+temporaries during actual writes/scans. It is not hostile-same-role isolation,
+whole-run serialization or a transaction across report JSON and Markdown.
+
+Rollback and explicit transaction recovery require the restored mode's underlay
+proof before clearing/archiving the journal. Failure remains pending and blocks
+further transactions. Missing evidence is a fail-closed refusal, not proof of a
+real traffic leak. File restoration/journal writes can themselves fail; offline
+fault tests are not a power-loss or live policy qualification.
+
+Collector freshness uses timer/service properties and file metadata. Future
+mtime is rejected, not tolerated as fresh. Recent metadata does not prove valid
+samples or an uncompromised collector. Retention counters expose eviction
+occurrences, not unique lost messages, native delivery or human acknowledgement.

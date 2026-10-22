@@ -42,6 +42,31 @@ revert is not sufficient. Check provenance and licensing before adding material.
    approval from that installation's operator. No automatic sync to an existing
    installation is provided.
 
+### Composed changes and source parity (5.10.0)
+
+Preserve contribution commits and add reviewable owner follow-ups where independent
+PRs change one contract. In particular, queue-loss metadata must not silently
+consume ordinary pending capacity: test reduced capacity, partial replay, byte
+pressure, acknowledgement failure and restart together, not just each patch alone.
+An old queue reader/writer cannot safely consume the new marker format.
+
+The reviewed deployment projection and reference tree share 23 Python source
+files byte-for-byte. The deployment projection retains a separate legacy
+`alert_tests.py` and its own provisioning; neither becomes a bundled public
+installer. Check the exact common-file mapping after each change, then test both
+layouts. Equal version numbers alone are not source or behavior parity evidence.
+
+Context managers must log their actual enter/yield/exit/error lifetime; decorating
+only generator creation is insufficient. Log fixed operation/state labels and
+exception classes, never supplied paths, exception text or raw responses.
+
+For every CLI semantic change, update `docs/UI_MAP.md` with invocation,
+preconditions, successful/degraded/error output and side effects. Keep raw API
+identity consumers distinct from historical projected metric booleans. Provenance
+warnings must remain generated and must not upgrade writable history to trusted
+history. Qualification and release statements must cite the final exact source
+and finite evidence, not a previous PR's green run.
+
 ### Integrity manifests and shared fixtures
 
 `test_support.py` is imported by all three regression suites. The console's
@@ -82,3 +107,9 @@ Before a public visibility decision:
   configured by source.
 * Confirm the visibility change explicitly with the owner. Maintain this as an
   independent community tool unless upstream explicitly agrees otherwise.
+
+The raw-peer regression guard also inventories direct literal `up` reads in every
+maintained runtime function. A new read or consumer requires explicit semantic
+classification; the reviewed allowlist distinguishes schema/transport projection
+from persisted metric booleans. This AST guard is not complete data-flow analysis
+and does not establish application liveness or cover dynamic field aliases.

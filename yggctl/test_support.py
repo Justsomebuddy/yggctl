@@ -16,6 +16,7 @@ from core import (
     Paths,
     NODE,
     STACK,
+    TIMER,
     FILES,
     KEYS,
     logged,
@@ -68,7 +69,7 @@ class ConsoleFixture(unittest.TestCase):
         self.responses: dict[str, Any] = {}
         self.calls = []
         self.failed_command = None
-        self.ps = [{"remote": URI, "up": True, "inbound": False, "latency": 1000000}]
+        self.ps = [{"remote": URI, "up": True, "inbound": False, "latency": 1000000, "key": PIN}]
         config = {
             "Peers": [
                 URI,
@@ -133,10 +134,14 @@ class ConsoleFixture(unittest.TestCase):
             value = self.responses.get(method, default)
             return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
         if "systemctl" in argv[0]:
+            # systemd 262 renders a fired timer with a trigger timestamp; a unit that
+            # never fired keeps the property empty.
             data = (
                 "ActiveState=active\nSubState=running\nMainPID="
                 + ("1002" if STACK in argv else "1001")
-                + "\nNRestarts=0\nExecMainStatus=0\n"
+                + "\nNRestarts=0\nExecMainStatus=0\nLastTriggerUSec="
+                + ("Thu 2026-10-19 10:00:00 UTC" if TIMER in argv else "")
+                + "\n"
             )
         elif "mullvad" in argv[0]:
             data = "Excluded PIDs:\n1001\n1002\n"

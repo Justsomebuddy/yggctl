@@ -149,6 +149,31 @@ class ResearchTests(ConsoleFixture):
         self.assertFalse(any(e["kind"] == "direct_peer" for e in graph["edges"]))
 
     @logged
+    def test_peer_rows_are_not_deduplicated(self):
+        # Real Yggdrasil v0.5.14 answers: an unreachable peer has no key, and a peer
+        # reached over two transports (multilink) reports the same key twice.
+        down = {"key": "", "up": False, "inbound": False, "port": 0}
+        link = {"key": B, "up": True, "inbound": False, "port": 1, "latency": 320000}
+        other = dict(link, latency=570000)
+        rows = model.project("peers", {"peers": [down, dict(down)]})
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["key"] for row in rows}, {None})
+        rows = model.project("peers", {"peers": [link, other]})
+        self.assertEqual([row["latency_ms"] for row in rows], [0.32, 0.57])
+        # Tree and path rows do have an identity, so duplicates remain an error.
+        tree = {"key": B, "parent": A, "sequence": 1}
+        with self.assertRaisesRegex(Failure, "duplicate_entry"):
+            model.project("tree", {"tree": [tree, dict(tree)]})
+        path = {"key": C, "path": [1], "sequence": 2}
+        with self.assertRaisesRegex(Failure, "duplicate_entry"):
+            model.project("paths", {"paths": [path, dict(path)]})
+        # A persisted snapshot with two unreachable peers stays valid and stable.
+        self.responses["getPeers"]["peers"] = [down, dict(down)]
+        saved = self.saved()
+        self.assertEqual(len(saved["observations"]["peers"]), 2)
+        self.assertIs(saved["identity_stable"], True)
+
+    @logged
     def test_duplicate_entries_and_bad_keys_fail_projection(self):
         for source, bad in (
             ("tree", {"tree": [self.responses["getTree"]["tree"][0]] * 2}),

@@ -60,6 +60,74 @@ This covers producer-side queue recovery. Queue retention, consumer wakeups,
 external sender behavior and human acknowledgement are separate contracts;
 exactly-once delivery is not promised.
 
+### Source 5.10.0: composed producer and retention behavior
+
+An initial pending replay still runs before staging new transitions. If replay
+fails, the collector attempts to save the already-observed peer transition or
+unknown-observation gap, then reports the failure. It does not silently repair
+corrupt queues, conflicting IDs or unsafe legacy payloads; bounded state writes
+can also fail. After appending missing events, replay revalidates IDs **and full
+payloads in the final queue**, then syncs before clearing only retained pending.
+Evicted pending remains retryable with `alert_pending_retained_after_queue_rotation`.
+
+The queue can retain `keep` ordinary alerts **plus one** `ygg-queue-retention`
+record. All bytes remain within the same 32 MiB bound; metadata reservation can
+reduce the ordinary suffix under byte pressure. Its cumulative
+`evicted_uncheckpointed_total` counts eviction occurrences lacking a local
+checkpoint, not unique undelivered messages. The marker is local metadata:
+never handed to SimpleX and never consumes native-attempt capacity. A nonzero
+historical total alone does not change exit status; monitor increases separately
+from `remaining`. Upgrade the reader and writer together; old code can misread
+or discard the marker. Missing historical alerts are not reconstructed.
+
+### Identity, history and freshness are different contracts
+
+Raw API consumers use `checks.identified`: exact `up is True` and a lowercase
+64-hex public key. It is shared by peer gates, collection/alerts, waits, watch and
+peer ranking. `peers-score` adds `identified` and ranks identified rows first,
+then by latency; it is not a trust/reliability/application-liveness score.
+Persisted schema-2 `up` booleans are already projected observations, not raw
+identity assertions to re-evaluate without a key.
+
+Research preserves all bounded peer rows, including keyless and multilink rows.
+Tree/path key duplicates remain invalid. Graphs aggregate direct links; diffs
+compare `(key, port, inbound)` group multiplicity and up-link counts, independent
+of duplicate-row ordering. Added/removed remain group tokens and `changed` also
+includes count changes. There is no stable per-transport-link identity.
+
+Every generated Research map/diff/report and capture result labels snapshots as
+unverified role-writable history. Stored schema 1 stays unchanged; file-supplied
+trust claims are not admitted. `sources=ok`, stable local keys and schema checks
+are not authenticity, unchanged-history or API-truth proofs. Capture declares
+`local_api_sequential_unattested`; reports and DOT/Markdown retain the warning.
+
+Research's worker owns a nonblocking directory flock around scans and each
+actual atomic artifact write. Only validated, owned mode-0600 single-link regular
+temporary files with reserved names are cleanup candidates after a full bounded
+directory scan. Unsafe/unknown entries fail closed; completed artifacts remain.
+This is cooperative crash recovery, not whole-run serialization or a two-file
+JSON/Markdown transaction. No hostile-same-role or power-loss guarantee follows.
+
+The collector gate requires an active timer, nonempty trigger evidence, accepted
+oneshot status and a nonempty regular metrics file with age 0..900 seconds.
+Any future mtime fails with `collector_data_future_timestamp`; older data fails
+with `collector_data_stale`, absent/empty/nonregular data with
+`collector_data_missing`, and missing trigger evidence with `collector_never_fired`.
+These properties are bounded freshness heuristics, not sample validation or
+collector authentication. Timestamp window filters still refuse/omit old samples;
+old data is not relabelled as current.
+
+### Compensation and explicit transaction recovery
+
+After restoring preimages and running compensation, `transaction` proves the
+restored underlay before deleting its active journal. A compensation/proof failure
+retains the journal with `rollback_runtime_failed`; the initiating action error
+remains primary and the secondary failure is its cause. Recovery apply restores,
+restarts/converges, checks integrity and proves underlay **before** archival.
+Failure preserves the active journal for explicit retry and blocks new mutations.
+Preview remains read-only and performs neither restart nor underlay probing.
+No new journal schema, retry loop, live-leak or power-loss guarantee is introduced.
+
 ### Other commands
 
 Peer/config transactions generally preview unless `--apply` is supplied.
@@ -76,3 +144,11 @@ Any integration or deployment requires a separate plan and rollback.
 Worker identities require the [separate-role migration](WORKER_IDENTITY.md);
 alert forwarding requires [private native-handoff configuration and shared-lock
 qualification](NATIVE_HANDOFF.md). Neither is an automatic install step.
+
+## Source/deployment projection
+
+The 23 common Python files are reviewed as byte-identical to the maintained
+deployment projection. Deployment-only legacy `alert_tests.py`, installation,
+manifests, units and configuration remain separate. This reference repository
+does not install, migrate or restart either layout. See the
+[5.10.0 qualification record](RELEASE-5.10.0.md) for the final source and evidence.

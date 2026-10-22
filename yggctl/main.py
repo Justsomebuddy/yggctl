@@ -452,6 +452,10 @@ def journal_records(data):
             ) or re.search(r"\\u[0-9a-fA-F]{4}", probe):
                 message = "[REDACTED sensitive journal message]"
                 event("state", "journal_redaction", "message_omitted")
+            else:
+                # A journal line can carry a peer URI with userinfo or a private path
+                # without any keyword. Apply the same output boundary as console/config.
+                message = public_config(message)
             unit = row.get("_SYSTEMD_UNIT")
             at = row.get("__REALTIME_TIMESTAMP", "")
             records.append(
@@ -541,9 +545,12 @@ def do_nodeinfo(ctx, args, a):
 
 @logged
 def do_peers_score(ctx, args, a):
-    data = checks.peers(ctx)
-    output(sorted(data, key=lambda p: (not p["up"], p.get("latency", 0))))
-    print("Ranking by current up/latency only; not a trust/reliability score")
+    data = [dict(p, identified=checks.identified(p)) for p in checks.peers(ctx)]
+    output(sorted(data, key=lambda p: (not p["identified"], p.get("latency", 0))))
+    print(
+        "Ranking by identified peer/latency only; raw up is transport state, "
+        "not a trust/reliability or application-liveness score"
+    )
 
 
 @logged

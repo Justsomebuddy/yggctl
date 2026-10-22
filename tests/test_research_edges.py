@@ -1,4 +1,4 @@
-"""Persisted provenance validation, retention caps and unknown historical data."""
+"""Persisted structure validation, retention caps and unknown historical data."""
 
 import contextlib
 import copy

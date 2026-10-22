@@ -6,13 +6,15 @@ import dataclasses
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import stat
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import checks
-from core import Failure, NODE, KEYS, atomic, digest, logged
+from core import Failure, NODE, KEYS, TIMER, atomic, digest, logged
 from test_support import ConsoleFixture, URI
 
 
@@ -186,8 +188,14 @@ class CheckEdges(ConsoleFixture):
             checks.service_gate(self.ctx, NODE)
         with self.assertRaisesRegex(Failure, "less_than_two"):
             checks.peer_gate(self.ctx, False)
+        self.ps[0]["key"] = "a" * 64
         self.ps.append(dict(self.ps[0], remote=URI.replace("192.0.2.1", "192.0.2.2")))
         checks.peer_gate(self.ctx, True)
+        # up:true without a key is a transport-only link, not a peer
+        for row in self.ps:
+            row["key"] = ""
+        with self.assertRaisesRegex(Failure, "less_than_two"):
+            checks.peer_gate(self.ctx, True)
         for method, field, good, bad, fn in (
             ("getMulticastInterfaces", "multicast_interfaces", [], [{}], checks.multicast_gate),
             ("getTun", "enabled", False, True, checks.tun_gate),
@@ -217,15 +225,17 @@ class CheckEdges(ConsoleFixture):
                 else:
                     with self.assertRaisesRegex(Failure, "packaged_unit"):
                         checks.masked_gate(self.ctx)
+        atomic(self.paths.state / "metrics.jsonl", b'{"ts":1}\n')
+        fired = {"ActiveState": "active", "LastTriggerUSec": "Thu 2026-10-19 10:00:00 UTC"}
         for timer, service, label in (
-            ({"ActiveState": "active"}, {"ActiveState": "inactive", "ExecMainStatus": "0"}, None),
+            (fired, {"ActiveState": "inactive", "ExecMainStatus": "0"}, None),
             ({}, {}, "collector_timer_inactive"),
             (
-                {"ActiveState": "active"},
+                dict(fired),
                 {"ActiveState": "failed", "ExecMainStatus": "0"},
                 "collector_failed",
             ),
-            ({"ActiveState": "active"}, {"ExecMainStatus": "1"}, "collector_failed"),
+            (dict(fired), {"ExecMainStatus": "1"}, "collector_failed"),
         ):
             with patch.object(self.ctx, "unit", side_effect=[timer, service]):
                 if label:
@@ -233,6 +243,110 @@ class CheckEdges(ConsoleFixture):
                         checks.timer_gate(self.ctx)
                 else:
                     checks.timer_gate(self.ctx)
+
+    @logged
+    def test_timer_gate_requires_trigger_and_fresh_samples(self):
+        path = self.paths.state / "metrics.jsonl"
+        fired = {"ActiveState": "active", "LastTriggerUSec": "Thu 2026-10-19 10:00:00 UTC"}
+        service = {"ActiveState": "inactive", "ExecMainStatus": "0"}
+        now = time.time()
+
+        def gate(timer=fired, svc=service):
+            with patch.object(self.ctx, "unit", side_effect=[timer, svc]):
+                return checks.timer_gate(self.ctx)
+
+        def stamp(age):
+            atomic(path, b'{"ts":1}\n')
+            os.utime(path, (now - age, now - age))
+
+        # A timer that started but never fired: systemd 262 leaves the property empty.
+        for value in ("", "   ", "0", "n/a", "N/A", None, 42):
+            with (
+                self.subTest(trigger=value),
+                self.assertRaisesRegex(Failure, "collector_never_fired"),
+            ):
+                gate(dict(fired, LastTriggerUSec=value))
+        with self.assertRaisesRegex(Failure, "collector_never_fired"):
+            gate({"ActiveState": "active"})
+
+        # A fresh append after a successful run is the only passing evidence.
+        window = checks.COLLECTOR_MAX_AGE_MINUTES * 60
+        stamp(0)
+        self.assertIsNone(gate())
+        stamp(window - 60)
+        self.assertIsNone(gate())
+
+        # Three days of retained history is not proof that collection still runs.
+        stamp(3 * 86400)
+        with self.assertRaisesRegex(Failure, "collector_data_stale"):
+            gate()
+        stamp(-3 * 86400)
+        with self.assertRaisesRegex(Failure, "collector_data_future_timestamp"):
+            gate()
+        stamp(window + 60)
+        with self.assertRaisesRegex(Failure, "collector_data_stale"):
+            gate()
+
+        # Missing, empty, non-regular and linked files are missing evidence, not staleness.
+        path.unlink()
+        with self.assertRaisesRegex(Failure, "collector_data_missing"):
+            gate()
+        atomic(path, b"")
+        with self.assertRaisesRegex(Failure, "collector_data_missing"):
+            gate()
+        path.unlink()
+        path.mkdir()
+        with self.assertRaisesRegex(Failure, "collector_data_missing"):
+            gate()
+        path.rmdir()
+        stamp(0)
+        other = self.paths.state / "metrics-real"
+        os.rename(path, other)
+        os.symlink(other, path)
+        with self.assertRaisesRegex(Failure, "collector_data_missing"):
+            gate()
+        path.unlink()
+        os.rename(other, path)
+        path.unlink()
+
+        # The live-context path: the fixture renders a fired timer and cannot stat a
+        # collector file that the fixture never writes, so freshness still fails closed.
+        with self.assertRaisesRegex(Failure, "collector_data_missing"):
+            checks.timer_gate(self.ctx)
+        show = [c for c in self.calls if "/usr/bin/systemctl" == c[0] and TIMER in c]
+        self.assertIn("LastTriggerUSec", show[-1][-1])
+        atomic(path, b'{"ts":1}\n')
+        self.assertIsNone(checks.timer_gate(self.ctx))
+
+    @logged
+    def test_identified_requires_up_and_a_public_key(self):
+        peer = {"remote": URI, "up": True, "key": "a" * 64}
+        self.assertTrue(checks.identified(peer))
+        for broken in (
+            dict(peer, up=False),
+            dict(peer, key=""),
+            dict(peer, key="A" * 64),
+            dict(peer, key="a" * 63),
+            dict(peer, up=1),
+            {"remote": URI},
+        ):
+            with self.subTest(row=broken):
+                self.assertFalse(checks.identified(broken))
+
+    @logged
+    def test_peer_counters_must_be_finite(self):
+        self.ps[0]["key"] = "a" * 64
+        base = dict(self.ps[0])
+        for field in ("latency", "bytes_recvd", "bytes_sent"):
+            for bad in (float("nan"), float("inf"), float("-inf"), -1, "1", True):
+                self.ps[:] = [dict(base, **{field: bad})]
+                with (
+                    self.subTest(field=field, value=bad),
+                    self.assertRaisesRegex(Failure, "invalid_peer_counter"),
+                ):
+                    checks.peers(self.ctx)
+        self.ps[:] = [dict(base, latency=0.0)]
+        self.assertEqual(len(checks.peers(self.ctx)), 1)
 
     @logged
     def test_composite_check_runs_every_gate_even_on_failure(self):

@@ -1,6 +1,57 @@
 # Changelog
 
-## [Unreleased]
+## [5.10.0] - 2026-10-22
+
+- Compose #13/#14/#39: preserve fresh observations after replay failure,
+  acknowledge pending only from the final synced queue, and persist cumulative
+  uncheckpointed-eviction occurrences. Retain up to the ordinary-alert count
+  limit **plus one** bounded metadata record under the unchanged 32 MiB cap.
+  Upgrade reader/writer together; neither visibility nor local native recording
+  guarantees delivery, exactly-once processing or human ACK.
+- Recover safe abandoned Research atomic temporaries with writer-owned directory
+  locking (#15); log the real context lifetime and failures, not generator creation.
+  Completed files are retained; report JSON/Markdown are individually atomic,
+  not a joint transaction or power-loss guarantee.
+- Label Research capture/map/diff/report, JSON/Markdown/DOT with generated
+  unverified role-writable snapshot provenance (#16). No authentication,
+  immutability, signature, truthful-API or hostile-same-role isolation guarantee.
+- Preserve keyless/multilink peer rows (#18/#17), retaining duplicate rejection
+  for tree/paths. Peer diffs account for tuple multiplicity rather than treating
+  arbitrary duplicate-row order as a stable per-link identity.
+- Require exact unified `/system.slice` sandbox unit paths (#24/#19), stream
+  bounded ZIP member data before aggregation (#25/#20), sanitize supported peer
+  URI strings including journal-facing text (#27/#22), and reject non-finite
+  or unrepresentably large peer counters with controlled failure (#28/#23),
+  including integers that overflow `math.isfinite` conversion. No archive
+  authentication or legacy-data purge.
+- Centralize raw identity checks across gates, samples, alerts, waits, watch
+  and peer ranking (#26/#33/#21/#30/#37). `peers-score` exposes `identified`;
+  transport `up` alone is not peer/application liveness. Historical projected
+  metric booleans retain their distinct schema contract.
+- Index stats windows while preserving first-duplicate/absence/output semantics
+  (#32/#29); this is not a strict whole-algorithm linear-time claim. Ignore the
+  regenerable `.hypothesis/` cache (#34/#31).
+- Require collector trigger evidence, accepted oneshot status and a nonempty
+  regular metrics file with age 0..900 seconds (#38/#36). Strictly reject any
+  future mtime as `collector_data_future_timestamp`; metadata freshness is not
+  validation/authentication of every sample.
+- Require restored-underlay proof after compensation and explicit transaction
+  recovery (#35). Failed proof retains the active journal; the initiating error
+  remains primary with compensation/proof failure as its cause. No live-leak claim.
+- Keep the 14 original contribution histories and add necessary integration
+  follow-ups. Align the 23 common Python source files byte-for-byte with the
+  maintained deployment projection; deployment-only legacy tests/provisioning
+  remain separate. This repository remains reference source without an installer.
+- Deployment safety rule: coordinate reader/writer migration and quiesce only the
+  Ygg-specific alert trigger/forwarder, not shared SimpleX. The reviewed external
+  hook refuses automatic post-publication 5.10→5.9 downgrade even with a currently
+  marker-free queue; retain candidate/manifests/queue/cursor/preimages for separately
+  reviewed quiesced recovery, not an automatic rollback-success claim.
+
+Exact final evidence and integration commit: [release record](docs/RELEASE-5.10.0.md).
+Publication does not modify installed files, services, policy or alert profiles.
+
+## Earlier source history
 
 ### Source 5.9.0 — durable native handoff (#9)
 
@@ -146,5 +197,5 @@
 - Document GitHub Issues and pull requests as the contribution/reporting route,
   with synthetic reproducers and no disclosure of operational secrets.
 
-The source version is 5.7.5; this source repository does not change installed files or running nodes.
+The current source version is 5.10.0; this source repository does not change installed files or running nodes.
 No stable release, generic installer or live deployment is claimed.

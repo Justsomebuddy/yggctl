@@ -1,6 +1,7 @@
-> Source **5.7.9**: history byte-cap recovery and failure-independent alert
-> processing (#10); [actual SimpleX bridge contract](docs/SIMPLEX_BRIDGE.md) (#9).
-> The bridge remains best-effort: process rc0 is not command acceptance or delivery.
+> Source **5.10.0**: composed alert recovery, explicit historical-data trust,
+> identified-peer checks and rollback proof. See the
+> [release contract](docs/RELEASE-5.10.0.md). Source tests are not deployment,
+> delivery or human-acknowledgement evidence.
 
 # yggctl
 
@@ -16,13 +17,20 @@ tool. It complements rather than replaces upstream `yggdrasilctl`.
 > host can stop services or alter configuration. No fresh-machine installation
 > or production-readiness guarantee is provided.
 
-## Source 5.9.0 integration notice
+## Integration notice
 
 Separate worker principals and expected-unit admission require reviewed
 [provisioning/migration](docs/WORKER_IDENTITY.md). Alert forwarding now requires
 [Ygg-only native-handoff configuration](docs/NATIVE_HANDOFF.md): ambiguous attempts
 remain pending without blind retry; local recording is not delivery/human ACK.
 This source change never updates an installed console or shared alert bridge.
+The 5.10.0 queue reader and writer must be upgraded together: retention metadata
+is not compatible with an older forwarder/compactor. Ordinary-alert capacity
+is unchanged; one additional bounded metadata record shares the existing byte cap.
+
+Research reports, maps and diffs now visibly label saved snapshots as
+**unverified role-writable history**. Structural validation and stable local
+identity checks do not authenticate origin, immutability or API truth.
 
 ## Scope
 
@@ -56,10 +64,10 @@ cd ..
 The suites use temporary directories, mocked system commands and local Unix
 sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
-The stdlib suites contain 106 console + 23 research + 33 atlas tests.
-With QA dependencies, Pytest also runs supplemental adversarial/property cases:
-323 unique tests, with measured 100% production statement and branch coverage
-on Python 3.14.8. This does not qualify a live deployment or prove correctness.
+The stdlib suites and supplemental Pytest cases cover synthetic behavior,
+faults and boundary conditions. Exact tested-source evidence belongs to the
+[5.10.0 release record](docs/RELEASE-5.10.0.md), not a timeless test-count promise.
+Statement/branch coverage does not prove correctness or qualify a live deployment.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).
 
@@ -77,6 +85,7 @@ on a production host without reviewing their effects and dependencies.
 * [Architecture and external integration](docs/ARCHITECTURE.md)
 * [Security policy](SECURITY.md) and [operational limitations](docs/SECURITY.md)
 * [Verification scope](docs/VERIFICATION.md)
+* [Source 5.10.0 contracts and qualification](docs/RELEASE-5.10.0.md)
 * [Contributing](CONTRIBUTING.md) and [development boundaries](DEVELOPMENT.md)
 * [Changelog](CHANGELOG.md) and [third-party references](THIRD_PARTY.md)
 

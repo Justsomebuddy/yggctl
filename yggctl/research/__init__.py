@@ -1,7 +1,10 @@
 """Bounded local research commands; no external crawl or network mutation."""
 
+import contextlib
 import datetime as dt
+import fcntl
 import json
+import os
 import re
 import stat
 import time
@@ -37,15 +40,83 @@ def folder(ctx, create=False):
 
 @logged
 def snapshot_files(ctx):
-    root = folder(ctx)
-    if root is None:
-        return []
-    found = []
-    # No arbitrary directories, links, or unrestricted root glob traversal.
-    # Stop before a hostile/unbounded directory can consume memory.
+    with ctx.locked():
+        root = folder(ctx)
+        if root is None:
+            return []
+        with store_locked(root):
+            return scan_store(root)
+
+
+@contextlib.contextmanager
+def store_locked(root):
+    # The worker must own this lock: its parent can die and release the
+    # console lock while an atomic artifact write is still in progress.
+    # Trace the generator's actual lifetime, not just its construction. Never
+    # log the supplied path or exception text (either can contain secrets).
+    event("entry", "store_locked")
+    try:
+        event("external_start", "research_store_open")
+        try:
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            event("external_error", "research_store_open", type(exc).__name__)
+            raise
+        event("external_exit", "research_store_open", "success")
+        try:
+            event("external_start", "research_store_flock")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                event("external_error", "research_store_flock", "BlockingIOError")
+                event("state", "research_store_lock", "busy")
+                raise Failure("research_store_busy") from None
+            except OSError as exc:
+                event("external_error", "research_store_flock", type(exc).__name__)
+                raise
+            event("external_exit", "research_store_flock", "success")
+            event("state", "research_store_lock", "acquired")
+            yield
+        finally:
+            event("external_start", "research_store_close")
+            try:
+                os.close(fd)  # Closing the owning descriptor releases flock.
+            except OSError as exc:
+                event("external_error", "research_store_close", type(exc).__name__)
+                raise
+            event("external_exit", "research_store_close", "success")
+            event("state", "research_store_lock", "closed")
+    except BaseException as exc:
+        event("error", "store_locked", type(exc).__name__)
+        raise
+    else:
+        event("exit", "store_locked", "success")
+
+
+@logged
+def store_atomic(path, data):
+    with store_locked(path.parent):
+        atomic(path, data)
+
+
+@logged
+def scan_store(root):
+    found, abandoned = [], []
+    # Validate the entire bounded directory before removing anything.
     for i, path in enumerate(root.iterdir()):
         if i >= LIMIT * 3:
             raise Failure("research_store_entry_limit")
+        if re.fullmatch(r"\.yggctl-[a-z0-9_]{8}", path.name):
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+            ):
+                raise Failure("research_unsafe_temporary_file")
+            abandoned.append(path)
+            continue
         if re.fullmatch(r"snapshot-[0-9a-f]{32}\.json", path.name):
             found.append(path)
         elif not re.fullmatch(
@@ -56,6 +127,9 @@ def snapshot_files(ctx):
             raise Failure("research_unsafe_store_entry")
     if len(found) > LIMIT:
         raise Failure("research_snapshot_limit")
+    for path in abandoned:
+        path.unlink()
+        event("state", "research_store", "abandoned_atomic_removed")
     return found
 
 
@@ -153,18 +227,24 @@ def capture(ctx):
         if len(data.encode()) > BYTE_LIMIT:
             raise Failure("research_projected_snapshot_size_limit")
         out = root / ("snapshot-" + result["id"] + ".json")
-        atomic(out, data + "\n")
+        store_atomic(out, data + "\n")
         event("state", "research_capture", "saved_allowlisted_projection")
         failures = sum(s != "ok" for s in result["sources"].values()) + int(
             result["identity_stable"] is not True
         )
         elapsed = time.monotonic() - started
         print(
-            f"snapshot_id={result['id']} file={out}; processed=5/5 remaining=0 errors={failures} elapsed={elapsed:.2f}s speed={5 / max(elapsed, 0.001):.2f}queries/s"
+            f"snapshot_id={result['id']} file={out}; provenance=unverified_role_writable_history acquisition=local_api_sequential_unattested; processed=5/5 remaining=0 errors={failures} elapsed={elapsed:.2f}s speed={5 / max(elapsed, 0.001):.2f}queries/s"
         )
         if failures:
             raise Failure("research_partial_snapshot_saved_not_full_local_success")
-        return {"snapshot_id": result["id"], "sequential_not_atomic": True, "world_coverage": None}
+        return {
+            "snapshot_id": result["id"],
+            "provenance": model.snapshot_provenance(),
+            "acquisition": "local_api_sequential_unattested",
+            "sequential_not_atomic": True,
+            "world_coverage": None,
+        }
 
 
 @logged
@@ -174,8 +254,9 @@ def topology_map(ctx, value=None):
         snapshot = selected(ctx, value)
         data = model.graph(snapshot)
         out = folder(ctx) / ("map-" + snapshot["id"] + ".dot")
-        atomic(out, model.dot(snapshot))
+        store_atomic(out, model.dot(snapshot))
         return {
+            "provenance": model.snapshot_provenance(),
             "snapshot_id": snapshot["id"],
             "sources": snapshot["sources"],
             "identity_stable": snapshot["identity_stable"],
@@ -210,6 +291,8 @@ def markdown(report):
         "Local node only; NOT a global census, packet trace or capacity benchmark.",
         "World node count, coverage fraction and throughput: UNKNOWN.",
         "Snapshots are sequential queries, not atomic topology cuts.",
+        "UNVERIFIED role-writable snapshot history: no authenticity/immutability guarantee.",
+        model.snapshot_provenance()["warning"],
         "Parent references are not confirmed live responders; tree edges are not transport links.",
         "",
         "## Topology",
@@ -307,6 +390,7 @@ def report(ctx, hours=24):
             "module_version": VERSION,
             "generated": now,
             "instance": "node",
+            "provenance": model.snapshot_provenance(),
             "world_nodes": None,
             "global_coverage_fraction": None,
             "throughput_bps": None,
@@ -334,22 +418,24 @@ def report(ctx, hours=24):
         }
         if latest:
             out = root / ("map-" + latest["id"] + ".dot")
-            atomic(out, model.dot(latest))
+            store_atomic(out, model.dot(latest))
             result["dot_file"] = str(out)
         identifier = uuid.uuid4().hex
         payload = json.dumps(result, sort_keys=True, allow_nan=False)
         if len(payload.encode()) > 16 * 1024 * 1024:
             raise Failure("research_report_size_limit")
         out = root / ("report-" + identifier)
-        # Independent immutable UUID artifacts; no accepted-baseline mutation.
-        atomic(out.with_suffix(".json"), payload + "\n")
-        atomic(out.with_suffix(".md"), markdown(result))
+        # Independent UUID artifacts, not immutable or authenticated history.
+        # JSON and Markdown are individually atomic, not a two-file transaction.
+        store_atomic(out.with_suffix(".json"), payload + "\n")
+        store_atomic(out.with_suffix(".md"), markdown(result))
         event("state", "research_report", "saved_scoped_artifacts")
         elapsed = time.monotonic() - start
         print(
             f"[3/3] processed=3/3 remaining=0 errors=0 elapsed={elapsed:.2f}s speed={3 / max(elapsed, 0.001):.2f}stages/s"
         )
         return {
+            "provenance": model.snapshot_provenance(),
             "json_file": str(out.with_suffix(".json")),
             "markdown_file": str(out.with_suffix(".md")),
             "snapshots": len(values),
