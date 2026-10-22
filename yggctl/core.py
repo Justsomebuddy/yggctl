@@ -471,7 +471,9 @@ PUBLIC_PEER_OPTIONS = {
     "priority": r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])",
 }
 PUBLIC_PEER_SCHEMES = ("tls", "tcp", "quic", "ws", "wss")
-URI_IN_TEXT = re.compile(r"(?:tls|tcp|quic|ws|wss)://[^\s\"'`<>()\[\],;]+")
+# URI sub-delimiters can be credential bytes, and IPv6 uses brackets. Consume
+# the whole non-whitespace token so a secret suffix cannot escape redaction.
+URI_IN_TEXT = re.compile(r"(?:tls|tcp|quic|ws|wss)://[^\s]+", re.IGNORECASE)
 
 
 @logged
@@ -514,14 +516,26 @@ def public_peer_uri(value):
 def _public_uri_in_text(match):
     """Redact one URI token inside free text, keeping trailing punctuation."""
     raw, trail = match.group(0), ""
-    while raw and raw[-1] in ".:":
+    while raw and raw[-1] in ".:,;)]}\"'`>":
         trail, raw = raw[-1] + trail, raw[:-1]
+    if trail and (raw.endswith("/") or "#" in raw):
+        # A punctuation-only path/fragment is still private metadata.
+        raw, trail = raw + trail, ""
     safe = public_peer_uri(raw)
     if safe is None:
-        # Not a well-formed yggdrasil URI (for example a DNS name): still drop
-        # credentials, fragment and query rather than echoing them.
-        safe = raw.split("#", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1] or "[REDACTED-URI]"
-    return safe + trail
+        # DNS endpoints are useful in diagnostics too. Reconstruct only a
+        # validated authority; never echo a failed parse's path or credentials.
+        safe = "[REDACTED-URI]"
+        try:
+            uri = urllib.parse.urlsplit(raw)
+            host, port = uri.hostname or "", uri.port
+            if re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", host) and port:
+                safe = f"{uri.scheme}://{host}:{port}"
+        except ValueError:
+            pass
+    # A suffix following private metadata may itself be the whole credential.
+    # Only preserve display punctuation after an otherwise unchanged safe URI.
+    return safe + (trail if safe == raw else "")
 
 
 @logged
@@ -535,7 +549,10 @@ def public_config(data):
     if isinstance(data, list):
         return [public_config(v) for v in data]
     if isinstance(data, str) and "://" in data:
-        return URI_IN_TEXT.sub(_public_uri_in_text, data)
+        # Retain the original userinfo protection for unrelated URI schemes,
+        # without treating Unix admin socket paths or ordinary links as peers.
+        clean = URI_IN_TEXT.sub(_public_uri_in_text, data)
+        return re.sub(r"(?<=://)[^/@\s]+@", "[REDACTED]@", clean)
     return data
 
 

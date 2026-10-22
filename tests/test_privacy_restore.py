@@ -33,7 +33,7 @@ class PrivacyRestore(ConsoleFixture):
         hostile = "tls://user:" + MARKER + "@192.0.2.1:443?password=" + MARKER
         for data, expected in (
             ({"peers": [{"remote": hostile}]}, {"peers": [{"remote": ENDPOINT}]}),
-            ("dial " + hostile + ": timeout", "dial " + ENDPOINT + ": timeout"),
+            ("dial " + hostile + ": timeout", "dial " + ENDPOINT + " timeout"),
             (
                 "see tls://peer.example:443?password=" + MARKER + " now",
                 "see tls://peer.example:443 now",

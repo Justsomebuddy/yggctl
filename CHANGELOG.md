@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Console peer-URI redaction covers bracketed IPv6, mixed-case schemes and
+  credential punctuation in nested API/config output and diagnostic text.
+  DNS fallbacks discard paths as well as userinfo, queries and fragments;
+  malformed endpoints are redacted instead of echoed. Public literal endpoints
+  and typed pin/timing options remain visible. Existing histories are unchanged.
+
 ### Source 5.9.0 — durable native handoff (#9)
 
 - Ygg-only native outgoing-item proof and fsynced pre-launch attempt journal;
