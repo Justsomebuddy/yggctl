@@ -1,5 +1,8 @@
 # Historical report interaction contract
 
+Current source: **5.10.0**. Earlier dated sections below describe historical
+behavior; the final section defines the current changed CLI contracts.
+
 ## 2026-10-20 — source 5.7.5
 
 | ID | Invocation | Expected result | Bounds and failure behavior |
@@ -54,7 +57,7 @@ a host's systemd boundary or an installation.
 
 Tests use bounded synthetic histories and sender outcomes, not live notification
 or multi-day evidence. See the actual bridge algorithm and limitations in
-`SIMPLEX_BRIDGE.md` (public) / doc35 (private). No new command or network policy.
+`SIMPLEX_BRIDGE.md`. No new command or network policy.
 
 ## Role identity/native handoff (5.8.0/5.9.0; #7/#9)
 
@@ -67,3 +70,45 @@ or multi-day evidence. See the actual bridge algorithm and limitations in
 
 CLI syntax is unchanged; help names separate role users. Installation requires
 reviewed provisioning/migration; publication alone changes no installed runtime.
+
+## Current changed interactions (5.10.0; 2026-10-22)
+
+| ID | Invocation / precondition | Visible result and side effects | Error / limit |
+|---|---|---|---|
+| ALERT-REPLAY-OBSERVATION | `collect`, existing pending replay fails | Attempt atomic staging of the fresh transition or unknown-observation gap; keep stable pending IDs | Original replay failure remains nonzero; bounded staging/storage can also fail. No corrupt-queue reset or fake acknowledgement. |
+| ALERT-REPLAY-FINAL | Replay appends events and may compact the queue | Re-read final queue, compare ID and full payload, sync queue/directory, acknowledge only retained matches | Evicted IDs stay pending; `alert_pending_retained_after_queue_rotation`. Read/sync failure does not clear pending. |
+| ALERT-RETENTION-METADATA | `alerts-forward`, queue has experienced uncheckpointed evictions | Print `evicted_uncheckpointed_total` before work and in summary, even at `remaining=0`; marker never sent | Count is eviction occurrences, not unique undelivered events. Historical nonzero alone does not change exit status. |
+| ALERT-RETENTION-CAPACITY | Count/byte compaction | Up to `keep` ordinary alerts plus one bounded `ygg-queue-retention` record; ordinary alert count is not reduced merely to reserve a count slot | Same 32 MiB byte cap; metadata bytes can reduce retained suffix under pressure. Reader/writer must upgrade together. |
+| CLI-RESEARCH-RECOVERY | `research capture/map/diff/report`, safe abandoned atomic temp exists | Writer-owned directory flock protects actual writes/scans; remove only validated reserved temporary files after full directory validation | Busy store: `research_store_busy`; unknown/unsafe entries fail closed. Completed data retained. No whole-run or JSON/MD-pair transaction. |
+| CLI-RESEARCH-TRUST | Capture/map/diff/report results, report JSON/Markdown and DOT | Generated `provenance.status=unverified_role_writable_history`, `authenticated=false`, `immutable_since_capture=false`; visible UNVERIFIED warning | No origin, immutability, signature or API-truth guarantee. File-supplied provenance is not accepted into snapshot schema 1. |
+| CLI-RESEARCH-CAPTURE | `research capture`, including partial saved result | Print unverified-history and `acquisition=local_api_sequential_unattested`; successful result repeats these fields | Partial saved capture still raises its existing nonzero failure. Stable local keys/source `ok` do not authenticate observations. |
+| CLI-RESEARCH-MULTILINK | Map/diff/report over keyless or repeated peer tuples | Preserve peer rows; graph aggregates links. Diff `changed` includes tuple link/up-link count changes and is row-order independent | No stable per-link identity; unknown sources remain unknown. Tree/path duplicate keys remain invalid. |
+| CLI-IDENTIFIED-PEERS | `check`, `collect`, waits, `watch` | Count only raw `up is True` with a lowercase 64-hex key | Transport-only connections do not satisfy peer/convergence gates; this does not prove application liveness. Historical projected booleans are unchanged. |
+| CLI-PEERS-SCORE | `peers-score` | Add `identified`, rank identified first then latency; print explicit ranking disclaimer | Raw `up` remains transport state. Ranking is not trust, reliability or application health. |
+| CLI-COLLECTOR-FRESHNESS | `check`, collector gate | Require active timer/trigger evidence, accepted service status, regular nonempty metrics file age 0..900s | `collector_never_fired`, `collector_data_missing`, `collector_data_stale`, or strictly `collector_data_future_timestamp` for any future mtime. Metadata is not sample correctness. |
+| CLI-ROLLBACK-PROOF | Failed peer/mode/config transaction after preimage restoration | Compensation then restored-underlay proof before journal removal; initiating action error remains primary | Failed compensation/proof retains `rollback_runtime_failed` journal, secondary error as cause; further mutations remain blocked. No live-leak inference. |
+| CLI-RECOVERY-PROOF | `recover-transaction --apply` | Restore, restart/converge, integrity and underlay proof before journal archival | Failure retains active journal for explicit retry. Preview does not restart or probe underlay. No journal schema change. |
+| CLI-PUBLIC-URI | Supported peer URI strings in config/output/journal-facing labels | Remove credentials, unapproved query/path/fragment metadata; retain only allowed typed public labels | Not a universal free-text secret detector; no purge of old files/logs. |
+| CLI-PEER-COUNTERS | Raw admin peer counters | Accept supported finite nonnegative numbers; bool/string/NaN/Infinity and integers too large for finite-value conversion are rejected | Controlled `invalid_peer_counter`, not uncaught `OverflowError`; no automatic legacy-metric rewrite. |
+| CLI-STATS-INDEX | `stats` / graph window | Indexed lookup, same sorted output, first duplicate and absent semantics | Extra index memory; no strict whole-algorithm linear-time or universal speed promise. |
+| IPC-SANDBOX-UNIT | Detect own worker launch | Only exact unified `/system.slice/yggctl-sandbox-<role>-<id>.service` accepted | User-slice/suffix/nested matches rejected; kernel broker admission remains separately mandatory. |
+| ATLAS-ZIP-BUDGET | Read approved repository ZIP response | Bounded member streaming before aggregation; 8 MiB aggregate bytes delivered by ZIP reader | `atlas_catalogue_decompression_limit`; no independent hidden-stream attestation, total-RSS bound or TLS-bypass claim. |
+
+These changes add no command or network-policy permission. See
+[release evidence and limits](RELEASE-5.10.0.md); source regression results do not
+prove an installed node, live notification delivery or human acknowledgement.
+
+### External migration / recovery refusal
+
+This repository bundles no deployment hook. The reviewed external migration
+contract coordinates queue reader/writer changes and quiesces the Ygg-only alert
+path/service; shared SimpleX is not stopped or restarted. After 5.10 publication,
+the hook conservatively refuses automatic downgrade to 5.9 even if a queue scan
+currently finds no marker: an already-imported old writer is a race, not a safe
+rollback proof. Candidate files, manifest, queue/cursor and exact preimages are
+retained for separately reviewed quiesced recovery. A refusal is not successful
+automatic rollback, and no queue/cursor reset is authorized by this contract.
+
+Source 5.10.0 raw-peer checks have both named-consumer regressions and an inventory
+guard for new direct literal `up` reads. The guard permits reviewed schema and
+historical projections; it is not a blanket ban or a data-flow proof.

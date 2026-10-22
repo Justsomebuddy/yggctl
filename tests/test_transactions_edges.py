@@ -154,9 +154,13 @@ class TransactionEdges(ConsoleFixture):
         atomic(path, json.dumps({"old": {str(self.paths.etc / "mode"): "direct\n"}}))
         mg.recover_transaction(self.ctx)
         self.assertTrue(path.exists())
-        with patch.object(mg, "restart_pair") as restart:
+        with (
+            patch.object(mg, "restart_pair") as restart,
+            patch.object(mg, "underlay") as proof,
+        ):
             mg.recover_transaction(self.ctx, True)
             restart.assert_called_once_with(self.ctx)
+            proof.assert_called_once_with(self.ctx)
         self.assertFalse(path.exists())
         self.assertEqual(len(list(self.paths.state.glob("recovered-*.json"))), 1)
 

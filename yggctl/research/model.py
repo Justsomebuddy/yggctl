@@ -13,6 +13,17 @@ MAX_ENTRIES = 4096
 
 
 @logged
+def snapshot_provenance():
+    """Generated trust contract, never an assertion read from a saved snapshot."""
+    return {
+        "status": "unverified_role_writable_history",
+        "authenticated": False,
+        "immutable_since_capture": False,
+        "warning": "Stored snapshots are role-writable and unauthenticated; schema/source status and identity_stable do not verify origin, immutability or API truth.",
+    }
+
+
+@logged
 def public_key(value, optional=False):
     if optional and value in (None, ""):
         return None
@@ -89,7 +100,12 @@ def project(source, reply, stored=False):
                 if stored
                 else latency(p.get("latency"), 1e6),
             }
-            token = (row["key"], row["port"], row["inbound"])
+            # The daemon exposes no per-link identity: the same peer appears once per
+            # transport (multilink) with the same key, port and direction, and every
+            # unreachable peer reports the same empty key, port 0 and direction. Peer
+            # rows are therefore not deduplicated at all; the reply stays bounded by
+            # MAX_ENTRIES and by the snapshot byte limit.
+            token = None
         elif source == "tree":
             row = {
                 "key": public_key(p.get("key")),
@@ -109,16 +125,17 @@ def project(source, reply, stored=False):
             token = row["key"]
         else:
             raise Failure("research_unknown_source")
-        if token in seen:
-            raise Failure("research_duplicate_entry")
-        seen.add(token)
+        if token is not None:
+            if token in seen:
+                raise Failure("research_duplicate_entry")
+            seen.add(token)
         rows.append(row)
     return sorted(rows, key=lambda r: (r["key"] or "", r.get("port", 0), r.get("inbound", False)))
 
 
 @logged
 def validate(snapshot):
-    """Revalidate persisted observations, including their provenance schema."""
+    """Validate structure only; this cannot authenticate origin or API truth."""
     if not isinstance(snapshot, dict) or set(snapshot) != {
         "schema",
         "id",
@@ -220,11 +237,26 @@ def graph(snapshot):
     for p in obs["paths"] or []:
         nodes.setdefault(p["key"], set()).add("path_entry")
     return {
+        "provenance": snapshot_provenance(),
         "nodes": [{"key": k, "roles": sorted(nodes[k])} for k in sorted(nodes)],
         "edges": [edges[k] for k in sorted(edges)],
         "unknown_peer_keys": sum(p["key"] is None for p in obs["peers"] or []),
         "limits": "local observations; parent references are not responders; tree edges are not transport links; path coordinates are not packet traces",
     }
+
+
+@logged
+def peer_link_groups(rows):
+    """Aggregate projected links, without inventing identities for duplicate tuples."""
+    groups: dict[str, dict[str, int]] = {}
+    for row in rows:
+        if row["key"] is None:
+            continue
+        token = row["key"] + ":" + str(row["port"]) + ":" + str(row["inbound"])
+        counts = groups.setdefault(token, {"links": 0, "up_links": 0})
+        counts["links"] += 1
+        counts["up_links"] += int(row["up"])
+    return groups
 
 
 @logged
@@ -238,6 +270,7 @@ def difference(before, after):
     if instant(after["started"]) <= instant(before["finished"]):
         raise Failure("research_snapshots_not_sequential")
     result = {
+        "provenance": snapshot_provenance(),
         "before": before["id"],
         "after": after["id"],
         "sources": {},
@@ -253,24 +286,21 @@ def difference(before, after):
             }
             continue
         a, b = before["observations"][source], after["observations"][source]
-        # Peer port distinguishes multiple local transport connections; never
-        # call a port replacement a disappearance of the remote identity.
-        ka = {
-            p["key"]
-            + (":" + str(p["port"]) + ":" + str(p["inbound"]) if source == "peers" else ""): p
-            for p in a
-            if p["key"]
-        }
-        kb = {
-            p["key"]
-            + (":" + str(p["port"]) + ":" + str(p["inbound"]) if source == "peers" else ""): p
-            for p in b
-            if p["key"]
-        }
+        # Duplicate peer tuples have no stable per-link identity. Compare their
+        # multiplicity/up-count, never an order-dependent last row or a fake link ID.
+        if source == "peers":
+            ka, kb = peer_link_groups(a), peer_link_groups(b)
+        else:
+            ka = {p["key"]: p for p in a}
+            kb = {p["key"]: p for p in b}
         changed = []
         for key in sorted(ka.keys() & kb.keys()):
             fields = (
-                ("up",) if source == "peers" else ("parent",) if source == "tree" else ("path",)
+                ("links", "up_links")
+                if source == "peers"
+                else ("parent",)
+                if source == "tree"
+                else ("path",)
             )
             if any(ka[key][f] != kb[key][f] for f in fields):
                 changed.append(key)
@@ -291,7 +321,10 @@ def difference(before, after):
 @logged
 def dot(snapshot):
     data = graph(snapshot)
-    lines = ["digraph observed {", '  label="Observed local topology — not global coverage";']
+    lines = [
+        "digraph observed {",
+        '  label="Observed local topology — not global coverage\\nUNVERIFIED role-writable history; no authenticity/immutability guarantee or API truth attestation";',
+    ]
     for n in data["nodes"]:
         shape = (
             "doublecircle"

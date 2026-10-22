@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.9.0"
+VERSION = "5.10.0"
 # The reader accepts the writer's full pre-compaction retention window.
 METRIC_RETENTION = 10000
 METRIC_RECORD_LIMIT = METRIC_RETENTION * 6 // 5
@@ -343,7 +343,8 @@ class Context:
                 "/usr/bin/systemctl",
                 "show",
                 unit,
-                "--property=ActiveState,SubState,MainPID,NRestarts,UnitFileState,ExecMainStatus",
+                "--property=ActiveState,SubState,MainPID,NRestarts,"
+                "UnitFileState,ExecMainStatus,LastTriggerUSec",
             ]
         )
         return dict(line.split("=", 1) for line in r.stdout.decode().splitlines() if "=" in line)
@@ -462,6 +463,82 @@ def atomic(path, data, mode=0o600):
             os.unlink(tmp)
 
 
+# Only typed public pin/timing options may survive a peer's display identity.
+# Unknown options (including encoded/case-varied credentials) discard ALL URI
+# metadata, not only a guessed password value. Old safe labels remain stable.
+PUBLIC_PEER_OPTIONS = {
+    "key": r"[0-9a-fA-F]{64}",
+    "maxbackoff": r"[0-9]{1,5}(?:ms|s|m|h)",
+    "priority": r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])",
+}
+PUBLIC_PEER_SCHEMES = ("tls", "tcp", "quic", "ws", "wss")
+# URI sub-delimiters can be credential bytes, and IPv6 uses brackets. Consume
+# the whole non-whitespace token so a secret suffix cannot escape redaction.
+URI_IN_TEXT = re.compile(r"(?:tls|tcp|quic|ws|wss)://[^\s]+", re.IGNORECASE)
+
+
+@logged
+def public_peer_uri(value):
+    """Credential-free rendering of a peer URI, or None when value is not one."""
+    if not isinstance(value, str) or len(value) > 4096 or re.search(r"[\s\x00-\x1f]", value):
+        return None
+    try:
+        uri = urllib.parse.urlsplit(value)
+        hostname = uri.hostname or ""
+        if "%" in hostname:
+            raise ValueError("scoped_endpoint_not_public_label")
+        host = ipaddress.ip_address(hostname)
+        port = uri.port
+    except ValueError:
+        return None
+    if uri.scheme not in PUBLIC_PEER_SCHEMES or not port:
+        return None
+    authority = f"[{host}]" if host.version == 6 else str(host)
+    endpoint = f"{uri.scheme}://{authority}:{port}"
+    try:
+        options = urllib.parse.parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return endpoint
+    safe_options = len({k for k, _ in options}) == len(options) and all(
+        re.fullmatch(PUBLIC_PEER_OPTIONS.get(k, r"(?!)"), v) for k, v in options
+    )
+    if (
+        uri.username is None
+        and uri.password is None
+        and not uri.fragment
+        and uri.path in ("", "/")
+        and safe_options
+    ):
+        return value
+    return endpoint
+
+
+@logged
+def _public_uri_in_text(match):
+    """Redact one URI token inside free text, keeping trailing punctuation."""
+    raw, trail = match.group(0), ""
+    while raw and raw[-1] in ".:,;)]}\"'`>":
+        trail, raw = raw[-1] + trail, raw[:-1]
+    if trail and (raw.endswith("/") or "#" in raw):
+        # A punctuation-only path/fragment is still private metadata.
+        raw, trail = raw + trail, ""
+    safe = public_peer_uri(raw)
+    if safe is None:
+        # DNS endpoints are useful in diagnostics too. Reconstruct only a
+        # validated authority; never echo a failed parse's path or credentials.
+        safe = "[REDACTED-URI]"
+        try:
+            uri = urllib.parse.urlsplit(raw)
+            host, port = uri.hostname or "", uri.port
+            if re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", host) and port:
+                safe = f"{uri.scheme}://{host}:{port}"
+        except ValueError:
+            pass
+    # A suffix following private metadata may itself be the whole credential.
+    # Only preserve display punctuation after an otherwise unchanged safe URI.
+    return safe + (trail if safe == raw else "")
+
+
 @logged
 def public_config(data):
     secret = {"privatekey", "grouppassword", "password", "token", "secret"}
@@ -473,7 +550,10 @@ def public_config(data):
     if isinstance(data, list):
         return [public_config(v) for v in data]
     if isinstance(data, str) and "://" in data:
-        return re.sub(r"(?<=://)[^/@\s]+@", "[REDACTED]@", data)
+        # Retain the original userinfo protection for unrelated URI schemes,
+        # without treating Unix admin socket paths or ordinary links as peers.
+        clean = URI_IN_TEXT.sub(_public_uri_in_text, data)
+        return re.sub(r"(?<=://)[^/@\s]+@", "[REDACTED]@", clean)
     return data
 
 

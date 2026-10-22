@@ -19,7 +19,7 @@ from core import (
     timestamp,
     event,
 )
-from checks import integrity, peers, underlay
+from checks import identified, integrity, peers, underlay
 
 
 @logged
@@ -83,17 +83,21 @@ def transaction(ctx, updates, action, compensate):
             action()
             manifest_update(ctx, set(updates))
             integrity(ctx)
-        except BaseException:
+        except BaseException as primary_error:
             event("state", "transaction", "rolling_back")
             for name, data in old.items():
                 atomic(Path(name), data, 0o644)
             try:
                 compensate()
-            except BaseException:
+                # Restored files and peers do not prove the selected old underlay.
+                event("state", "transaction", "verifying_rollback_underlay")
+                underlay(ctx)
+            except BaseException as rollback_error:
                 event("error", "transaction", "rollback_runtime_failed")
                 record["phase"] = "rollback_runtime_failed"
                 atomic(pending, json.dumps(record))
-                raise Failure("rollback_runtime_failed_pending_journal_retained") from None
+                # Keep the initiating failure primary, with rollback failure as cause.
+                raise primary_error from rollback_error
             pending.unlink()
             event("state", "transaction", "rolled_back")
             raise
@@ -111,7 +115,7 @@ def wait_peers(ctx, desired=None, seconds=25, absent=False):
         valid = True
         for stack in (False, True):
             rows = peers(ctx, stack)
-            up = {endpoint(p.get("remote", "")) for p in rows if p["up"]}
+            up = {endpoint(p.get("remote", "")) for p in rows if identified(p)}
             configured = {endpoint(p.get("remote", "")) for p in rows}
             valid &= len(up) >= 2 and (
                 desired is None or (desired not in configured if absent else desired in up)
@@ -239,6 +243,8 @@ def recover_transaction(ctx, apply=False):
             atomic(Path(name), data, 0o644)
         restart_pair(ctx)
         integrity(ctx)
+        event("state", "recovery", "verifying_underlay")
+        underlay(ctx)
         path.rename(ctx.p.state / ("recovered-" + uuid.uuid4().hex + ".json"))
         event("state", "recovery", "restored")
 
@@ -257,7 +263,7 @@ def service(ctx, command):
         if action in ("start", "restart"):
             # Node commands may start stack via dependency; require the requested unit.
             deadline = time.monotonic() + 25
-            while sum(p["up"] for p in peers(ctx, stack)) < 2:
+            while sum(identified(p) for p in peers(ctx, stack)) < 2:
                 if time.monotonic() >= deadline:
                     raise Failure("service_peer_timeout")
                 time.sleep(2)

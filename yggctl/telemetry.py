@@ -2,15 +2,12 @@
 
 import datetime as dt
 import hashlib
-import ipaddress
 import json
 import os
-import re
 import secrets
 import stat
 import statistics
 import time
-import urllib.parse
 from typing import Any
 
 from core import (
@@ -22,21 +19,12 @@ from core import (
     atomic,
     timestamp,
     event,
+    public_peer_uri,
     METRIC_RETENTION,
     METRICS_LIMIT,
 )
-from checks import peers
+from checks import identified, peers
 import simplex_sender
-
-
-# Only typed public pin/timing options can survive a peer's display identity.
-# Unknown options (including encoded/case-varied credentials) discard ALL URI
-# metadata, not only a guessed password value. Old safe labels remain stable.
-PUBLIC_PEER_OPTIONS = {
-    "key": r"[0-9a-fA-F]{64}",
-    "maxbackoff": r"[0-9]{1,5}(?:ms|s|m|h)",
-    "priority": r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])",
-}
 
 
 @logged
@@ -47,37 +35,7 @@ def peer_label(value):
     Existing queues/history are not rewritten: their IDs and delivery cursors
     must stay stable. Rendering applies this boundary again for legacy alerts.
     """
-    if not isinstance(value, str) or len(value) > 4096 or re.search(r"[\s\x00-\x1f]", value):
-        return "unknown-peer"
-    try:
-        uri = urllib.parse.urlsplit(value)
-        hostname = uri.hostname or ""
-        if "%" in hostname:
-            raise ValueError("scoped_endpoint_not_public_label")
-        host = ipaddress.ip_address(hostname)
-        port = uri.port
-    except ValueError:
-        return "unknown-peer"
-    if uri.scheme not in ("tls", "tcp", "quic", "ws", "wss") or not port:
-        return "unknown-peer"
-    authority = f"[{host}]" if host.version == 6 else str(host)
-    endpoint = f"{uri.scheme}://{authority}:{port}"
-    try:
-        options = urllib.parse.parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True)
-    except ValueError:
-        return endpoint
-    safe_options = len({k for k, _ in options}) == len(options) and all(
-        re.fullmatch(PUBLIC_PEER_OPTIONS.get(k, r"(?!)"), v) for k, v in options
-    )
-    if (
-        uri.username is None
-        and uri.password is None
-        and not uri.fragment
-        and uri.path in ("", "/")
-        and safe_options
-    ):
-        return value
-    return endpoint
+    return public_peer_uri(value) or "unknown-peer"
 
 
 @logged
@@ -126,6 +84,9 @@ def metric_compact(ctx, name, row, keep, appended=False):
     values = rows(ctx, name)
     if appended:
         values = values[:-1]
+    if name == "alerts.jsonl":
+        compact_alerts(ctx, values, row, keep)
+        return
     retained, size = [line], len(line)
     for previous in reversed(values[-(keep - 1) :] if keep > 1 else []):
         encoded = (json.dumps(previous, separators=(",", ":")) + "\n").encode()
@@ -137,11 +98,118 @@ def metric_compact(ctx, name, row, keep, appended=False):
     event("state", "metric_append", "compacted_by_byte_or_record_bound")
 
 
+ALERT_RETENTION_KIND = "ygg-queue-retention"
+ALERT_RETENTION_MAX = (1 << 63) - 1
+ALERT_RETENTION_ID = "ygg-queue-retention"
+
+
+@logged
+def alert_retention(records):
+    """Separate the one durable queue-loss marker from ordinary alerts."""
+    notice = None
+    ordinary = []
+    for item in records:
+        if item.get("kind") != ALERT_RETENTION_KIND:
+            ordinary.append(item)
+            continue
+        if notice is not None or set(item) != {"kind", "id", "evicted_uncheckpointed_total"}:
+            raise Failure("alert_retention_invalid")
+        total = item["evicted_uncheckpointed_total"]
+        if type(total) is not int or not 1 <= total <= ALERT_RETENTION_MAX:
+            raise Failure("alert_retention_invalid")
+        alert_id(item)
+        notice = item
+    return notice, ordinary
+
+
+@logged
+def forwarded_ids(ctx):
+    """Read the existing cursor format; absence is not a delivery checkpoint."""
+    raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
+    if raw is None:
+        return None
+    try:
+        sent = json.loads(raw)["sent"]
+        if (
+            not isinstance(sent, list)
+            or len(sent) > 2000
+            or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
+            or len(set(sent)) != len(sent)
+        ):
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise Failure("alerts_forwarded_state_invalid") from None
+    return sent
+
+
+@logged
+def alert_suffix(encoded, capacity, byte_budget):
+    """Find the newest complete suffix within both queue limits."""
+    used = 0
+    start = len(encoded)
+    while start > 0 and len(encoded) - start < capacity:
+        size = len(encoded[start - 1])
+        if used + size > byte_budget:
+            break
+        used += size
+        start -= 1
+    return start
+
+
+@logged
+def compact_alerts(ctx, values, row, keep):
+    """Keep ordinary-alert capacity plus one loss marker within the same byte cap.
+
+    Metadata must not steal a pending-event slot: a full recoverable outbox has
+    to fit after a previous loss. The one marker is additional bounded metadata,
+    never an alert or a delivery receipt. Byte pressure can still reduce capacity.
+    """
+    if row.get("kind") == ALERT_RETENTION_KIND:
+        raise Failure("alert_retention_reserved")
+    previous, ordinary = alert_retention(values)
+    ordinary.append(row)
+    encoded = [(json.dumps(item, separators=(",", ":")) + "\n").encode() for item in ordinary]
+    sent = set(forwarded_ids(ctx) or ())
+
+    start = alert_suffix(encoded, keep, METRICS_LIMIT)
+    initial_evictions = sum(alert_id(item) not in sent for item in ordinary[:start])
+    if previous is None and not initial_evictions:
+        atomic(ctx.p.state / "alerts.jsonl", b"".join(encoded[start:]), 0o640)
+        event("state", "metric_append", "compacted_by_byte_or_record_bound")
+        return
+
+    old_total = previous["evicted_uncheckpointed_total"] if previous else 0
+    # Reserve the largest possible marker first, so the suffix and count are
+    # selected once even when the counter crosses a decimal digit boundary.
+    maximal = {
+        "kind": ALERT_RETENTION_KIND,
+        "id": ALERT_RETENTION_ID,
+        "evicted_uncheckpointed_total": ALERT_RETENTION_MAX,
+    }
+    reserved = len((json.dumps(maximal, separators=(",", ":")) + "\n").encode())
+    if reserved + len(encoded[-1]) > METRICS_LIMIT:
+        raise Failure("alert_retention_capacity")
+    start = alert_suffix(encoded, keep, METRICS_LIMIT - reserved)
+    total = old_total + sum(alert_id(item) not in sent for item in ordinary[:start])
+    if total > ALERT_RETENTION_MAX:
+        raise Failure("alert_retention_overflow")
+    notice = {
+        "kind": ALERT_RETENTION_KIND,
+        "id": ALERT_RETENTION_ID,
+        "evicted_uncheckpointed_total": total,
+    }
+    marker = (json.dumps(notice, separators=(",", ":")) + "\n").encode()
+    atomic(ctx.p.state / "alerts.jsonl", marker + b"".join(encoded[start:]), 0o640)
+    event("state", "metric_append", "compacted_by_byte_or_record_bound")
+
+
 @logged
 def append(ctx, name, row, keep=METRIC_RETENTION):
     """Retain a newest suffix within 32 MiB; compact count at >120% of keep."""
     if type(keep) is not int or not 1 <= keep <= METRIC_RETENTION:
         raise Failure("invalid_metric_retention")
+    if name == "alerts.jsonl" and row.get("kind") == ALERT_RETENTION_KIND:
+        raise Failure("alert_retention_reserved")
     path = ctx.p.state / name
     line = (json.dumps(row, separators=(",", ":")) + "\n").encode()
     if len(line) > METRICS_LIMIT:
@@ -217,7 +285,7 @@ PEER_DOWN_MINUTES = 10
 UNSTABLE_RECONNECTS = 3  # reconnects within the last hour that make a peer "unstable"
 UNSTABLE_REPEAT_HOURS = 6  # at most one "unstable" alert per peer in this time
 PEER_STATE_LIMIT = 1 << 20
-PEER_PENDING_LIMIT = 1000  # no larger than the alert queue's retained record count
+PEER_PENDING_LIMIT = 1000  # no larger than the queue's ordinary-alert retention capacity
 PEER_ALERT_KINDS = ("ygg-peer-down", "ygg-peer-up", "ygg-peer-unstable")
 
 
@@ -305,9 +373,17 @@ def flush_peer_alerts(ctx):
             else:
                 append(ctx, "alerts.jsonl", item, PEER_PENDING_LIMIT)
                 event("alert", "peer_outbox", item["kind"])
+        # Appending a later event may compact away an earlier already-queued
+        # pending event. Acknowledge against the final queue, not the snapshot
+        # taken before these writes; retain exact IDs and payloads for retry.
+        queued = {alert_id(row): row for row in rows(ctx, "alerts.jsonl")}
+        remaining = [item for item in pending if queued.get(item["id"]) != item]
         sync_alert_queue(ctx)
-        state["pending"] = []
+        state["pending"] = remaining
         save_peer_state(ctx, state)
+        if remaining:
+            event("state", "peer_outbox", "retained_after_queue_rotation")
+            raise Failure("alert_pending_retained_after_queue_rotation")
         event("state", "peer_outbox", "acknowledged")
 
 
@@ -549,10 +625,12 @@ def forward(ctx):
     deadline = start + FORWARD_BUDGET
     ctx.root()
     with ctx.locked():
-        alerts = rows(ctx, "alerts.jsonl")
+        notice, alerts = alert_retention(rows(ctx, "alerts.jsonl"))
+        evicted = notice["evicted_uncheckpointed_total"] if notice else 0
+        print(f"alert queue retention: evicted_uncheckpointed_total={evicted}", flush=True)
         ids = [alert_id(a) for a in alerts]
-        raw = ctx.read_state("alerts-forwarded.json", 1 << 20)
-        if raw is None:
+        sent = forwarded_ids(ctx)
+        if sent is None:
             atomic(
                 ctx.p.state / "alerts-forwarded.json",
                 json.dumps({"sent": list(dict.fromkeys(ids))[-2000:]}) + "\n",
@@ -560,20 +638,10 @@ def forward(ctx):
             )
             print(
                 f"[1/1] forwarding initialised; processed={len(ids)} earlier alerts not sent; errors=0 "
-                f"remaining=0 elapsed={time.monotonic() - start:.2f}s"
+                f"remaining=0 evicted_uncheckpointed_total={evicted} "
+                f"elapsed={time.monotonic() - start:.2f}s"
             )
             return
-        try:
-            sent = json.loads(raw)["sent"]
-            if (
-                not isinstance(sent, list)
-                or len(sent) > 2000
-                or any(not isinstance(a, str) or not 1 <= len(a) <= 128 for a in sent)
-                or len(set(sent)) != len(sent)
-            ):
-                raise ValueError
-        except (ValueError, KeyError, TypeError):
-            raise Failure("alerts_forwarded_state_invalid") from None
         done, failures, processed = set(sent), 0, 0
         pending = [(a, aid) for a, aid in zip(alerts, ids) if aid not in done]
         for alert, aid in pending:
@@ -611,6 +679,7 @@ def forward(ctx):
         left = sum(aid not in done for aid in set(ids))
         print(
             f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
+            f"evicted_uncheckpointed_total={evicted} "
             f"elapsed={time.monotonic() - start:.2f}s; native local recording is NOT delivery/human ACK"
         )
         if failures:
@@ -642,15 +711,15 @@ def collect(ctx):
                 active = ctx.unit(unit).get("ActiveState", "unknown")
                 ps = peers(ctx, stack)  # Exactly one coherent admin query per instance.
                 if stack:
-                    sample["stack_up"] = sum(p["up"] for p in ps)
+                    sample["stack_up"] = sum(identified(p) for p in ps)
                 else:
                     uptimes = {peer_label(p.get("remote")): p.get("uptime") for p in ps}
                     sample["act"] = active
-                    sample["up"] = sum(p["up"] for p in ps)
+                    sample["up"] = sum(identified(p) for p in ps)
                     sample["peers"] = [
                         {
                             "r": peer_label(p.get("remote")),
-                            "up": p["up"],
+                            "up": identified(p),
                             "rtt": p.get("latency", 0) / 1e6,
                             "rx": p.get("bytes_recvd", 0),
                             "tx": p.get("bytes_sent", 0),
@@ -674,7 +743,15 @@ def collect(ctx):
         enabled = notify_state(ctx) == "on"
         if enabled:
             # Drain first: a full recoverable outbox must not block its own retry.
-            flush_peer_alerts(ctx)
+            try:
+                flush_peer_alerts(ctx)
+            except (Failure, OSError):
+                # Queue recovery must not hide an observation already obtained.
+                # Stage under the same lock, retaining pending IDs and all state
+                # validation/capacity checks. Do not retry or acknowledge the
+                # failed queue here; surface its original error after staging.
+                peer_alerts(ctx, sample, uptimes)
+                raise
         peer_alerts(ctx, sample, uptimes)
         if enabled:
             flush_peer_alerts(ctx)
@@ -730,14 +807,20 @@ def stats(ctx, hours=24, graph=False):
     gaps = sum(
         max(0, round((b[0] - a[0]).total_seconds() / 60) - 1) for a, b in zip(values, values[1:])
     )
-    names = sorted({p["r"] for _, r in values for p in r.get("peers", [])})
+    # One pass over the window instead of a scan of every record for every peer name.
+    index: dict[str, dict[int, dict[str, Any]]] = {}
+    for position, (_, row) in enumerate(values):
+        for peer in row.get("peers", []):
+            index.setdefault(peer["r"], {}).setdefault(position, peer)
+    names = sorted(index)
     print(
         f"window={hours}h samples={len(values)} unknown_records={unknown} "
         f"invalid_records={invalid} missing_minutes_between_samples={gaps}; "
         f"observed availability is NOT wall-clock uptime"
     )
     for name in names:
-        matches = [next((p for p in r.get("peers", []) if p["r"] == name), None) for _, r in values]
+        by_position = index[name]
+        matches = [by_position.get(position) for position in range(len(values))]
         known = [p for p in matches if p is not None]
         up = sum(p["up"] for p in known)
         latency = [p["rtt"] for p in known if p["up"] and p.get("rtt", 0) > 0]
@@ -771,8 +854,8 @@ def watch(ctx, count=5, interval=2):
     start, errors = time.monotonic(), 0
     for i in range(count):
         try:
-            node = sum(p["up"] for p in peers(ctx))
-            stack = sum(p["up"] for p in peers(ctx, True))
+            node = sum(identified(p) for p in peers(ctx))
+            stack = sum(identified(p) for p in peers(ctx, True))
         except (Failure, OSError, ValueError, KeyError):
             node = stack = "unknown"
             errors += 1
