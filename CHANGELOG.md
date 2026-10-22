@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- Separate `events [hours]` lookback (1..72, default 6) from its record limit.
+  Show up to 1000 newest matching events, with window/limit/returned/truncated
+  metadata and an explicit stderr warning when older matching events are omitted.
+  Probe at most 1001 records to distinguish a full result from truncation;
+  existing command byte/time bounds and journal redaction remain in force.
+  `logs [N]` keeps its existing line-count contract.
+
 ## [5.11.0] - 2026-10-22
 
 - Add read-only `trend [hours] [json]` over bounded stored metrics (#42/#43).
