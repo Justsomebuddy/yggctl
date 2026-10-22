@@ -105,8 +105,10 @@ contract coordinates queue reader/writer changes and quiesces the Ygg-only alert
 path/service; shared SimpleX is not stopped or restarted. After 5.10 publication,
 the hook conservatively refuses automatic downgrade to 5.9 even if a queue scan
 currently finds no marker: an already-imported old writer is a race, not a safe
-rollback proof. Candidate files, manifest, queue/cursor and exact preimages are
-retained for separately reviewed quiesced recovery. A refusal is not successful
+rollback proof. Reached runtime bytes/manifest, queue/cursor and exact preimages
+are retained for separately reviewed quiesced recovery. Partial publication may
+leave mixed bytes: keep affected workers stopped and do not invoke the CLI until
+coherent repair and verification. A refusal is not successful
 automatic rollback, and no queue/cursor reset is authorized by this contract.
 
 Source 5.10.0 raw-peer checks have both named-consumer regressions and an inventory

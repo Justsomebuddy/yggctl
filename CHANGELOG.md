@@ -45,8 +45,9 @@
 - Deployment safety rule: coordinate reader/writer migration and quiesce only the
   Ygg-specific alert trigger/forwarder, not shared SimpleX. The reviewed external
   hook refuses automatic post-publication 5.10→5.9 downgrade even with a currently
-  marker-free queue; retain candidate/manifests/queue/cursor/preimages for separately
+  marker-free queue; retain reached bytes/manifests/queue/cursor/preimages for separately
   reviewed quiesced recovery, not an automatic rollback-success claim.
+  Partial publication may leave mixed bytes; keep affected workers stopped until coherent repair.
 
 Exact final evidence and integration commit: [release record](docs/RELEASE-5.10.0.md).
 Publication does not modify installed files, services, policy or alert profiles.
