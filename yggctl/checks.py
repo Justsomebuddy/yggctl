@@ -21,6 +21,14 @@ from core import (
     endpoint,
 )
 
+# The collector runs once a minute and retains 10,000 samples (about a week), so a
+# frozen file keeps serving history long after collection stopped. 72 h is the longest
+# report window, PEER_DOWN_MINUTES is 10; 15 minutes tolerates a short collector outage
+# while still failing a file that a stopped or never-triggered collector left behind.
+# There is no runtime override: this project fixes paths, units and thresholds in code
+# and deliberately reads no environment variables.
+COLLECTOR_MAX_AGE_MINUTES = 15
+
 
 @logged
 def peers(ctx, stack=False):
@@ -573,9 +581,38 @@ def masked_gate(ctx):
 
 
 @logged
+def collector_freshness(ctx):
+    """The mtime of the newest append is the only durable evidence of a live collector.
+
+    systemd reports a oneshot that never ran as ActiveState=inactive, Result=success and
+    ExecMainStatus=0, so service state alone cannot prove that samples are still written.
+    A missing, empty, non-regular or future-stamped file is not such evidence either.
+    """
+    path = ctx.p.state / "metrics.jsonl"
+    try:
+        info = path.lstat()
+    except OSError:
+        raise Failure("collector_data_missing") from None
+    if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+        raise Failure("collector_data_missing")
+    # A timestamp in the future means clock skew or a copied file, never a fresh append,
+    # so the window is two-sided; stat results are floats and cannot be NaN here.
+    if abs(time.time() - info.st_mtime) > COLLECTOR_MAX_AGE_MINUTES * 60:
+        raise Failure("collector_data_stale")
+
+
+@logged
 def timer_gate(ctx):
-    if ctx.unit(TIMER).get("ActiveState") != "active":
+    t = ctx.unit(TIMER)
+    if t.get("ActiveState") != "active":
         raise Failure("collector_timer_inactive")
+    # An active timer that never fired renders LastTriggerUSec as an empty value, not as
+    # "0"; "n/a" is systemd's other rendering of "no value" and a missing or non-string
+    # property is not proof of a trigger.
+    triggered = t.get("LastTriggerUSec")
+    if not isinstance(triggered, str) or triggered.strip().lower() in ("", "0", "n/a"):
+        raise Failure("collector_never_fired")
     u = ctx.unit("ygg-metrics.service")
     if u.get("ActiveState") == "failed" or u.get("ExecMainStatus") != "0":
         raise Failure("collector_failed")
+    collector_freshness(ctx)

@@ -343,7 +343,8 @@ class Context:
                 "/usr/bin/systemctl",
                 "show",
                 unit,
-                "--property=ActiveState,SubState,MainPID,NRestarts,UnitFileState,ExecMainStatus",
+                "--property=ActiveState,SubState,MainPID,NRestarts,"
+                "UnitFileState,ExecMainStatus,LastTriggerUSec",
             ]
         )
         return dict(line.split("=", 1) for line in r.stdout.decode().splitlines() if "=" in line)
