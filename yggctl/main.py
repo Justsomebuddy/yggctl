@@ -43,7 +43,8 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
 Здоровье:     check (15 проверок), status, selftest [offline], guard, verify-hashes, socks, socks-test
 Просмотр:     peers, stack-peers, self, tree, paths, sessions, config [show|validate], mode [show],
               version, update-check, logs [N], events [часы], firewall-status
-Метрики:      collect, stats [часы], graph [часы], watch/top [N] [секунды], report, peers-score,
+Метрики:      collect, stats [часы], graph [часы], trend [часы] [json], watch/top [N] [секунды],
+              report, peers-score,
               notify on|off|show|test, alerts-forward
 Управление:   start, stop, restart, enable, disable (с приставкой stack- — для стека),
               stack-start, stack-stop, stack-restart, stack-enable, stack-disable;
@@ -62,8 +63,8 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
               discover. Для своей ноды — self, peers, tree.
 Закрыто:      nameserver и timer — только show; purge, rotate-key, chaos, upgrade, baseline-update
               отключены до отдельного ревью. Установка — scripts/deployment/deploy.sh.
-Без sudo:     help, version, update-check, stats, graph.
-Самотест:     selftest и selftest offline требуют sudo; stats/graph — читаемый файл метрик.
+Без sudo:     help, version, update-check, stats, graph, trend.
+Самотест:     selftest и selftest offline требуют sudo; stats/graph/trend — читаемый файл метрик.
 Песочница:    research, atlas и команды сети Yggdrasil работают от отдельных пользователей ролей без
               root и без ключей; у research нет сети, у сетевых команд — только localhost.
 Тревоги:      пир недоступен 10+ минут, нестабилен (3+ разрыва за час) или вернулся, сбой ноды —
@@ -265,6 +266,24 @@ def do_stats(ctx, args, a):
         ctx.root()
     graph = args.command == "graph"
     telemetry.stats(ctx, bounded_number(a[0], 1, 72) if a else (6 if graph else 24), graph)
+
+
+@logged
+def do_trend(ctx, args, a):
+    # Read-only and lock-free like stats: sudo only when this user cannot read the file.
+    if os.geteuid() != 0 and not os.access(ctx.p.state / "metrics.jsonl", os.R_OK):
+        ctx.root()
+    machine = bool(a and a[-1] == "json")
+    values = a[:-1] if machine else a
+    if len(values) > 1:
+        raise Failure("trend_optional_hours_then_json")
+    hours = bounded_number(values[0], 1, 72) if values else 24
+    report = telemetry.trend(ctx, hours)
+    if machine:
+        output(report)
+        return
+    for line in telemetry.trend_text(report):
+        print(line)
 
 
 API_VIEWS = {
@@ -605,6 +624,7 @@ COMMANDS = {
     "selftest": Command(do_selftest, most=1, root=False),
     "stats": Command(do_stats, most=1, root=False),
     "graph": Command(do_stats, most=1, root=False),
+    "trend": Command(do_trend, most=2, root=False),
     **{name: Command(do_view) for name in API_VIEWS},
     "check": Command(do_check),
     "status": Command(do_check),

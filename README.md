@@ -1,7 +1,8 @@
-> Source **5.10.0**: composed alert recovery, explicit historical-data trust,
-> identified-peer checks and rollback proof. See the
-> [release contract](docs/RELEASE-5.10.0.md). Source tests are not deployment,
-> delivery or human-acknowledgement evidence.
+> Source **5.11.0** adds a read-only stored-history `trend [hours] [json]` report.
+> History is unverified and role-writable; trend verdicts are policy heuristics,
+> not live health, authenticity or delivery evidence. See the
+> [5.11.0 contract](docs/RELEASE-5.11.0.md); earlier recovery/migration rules remain
+> in the [5.10.0 record](docs/RELEASE-5.10.0.md).
 
 # yggctl
 
@@ -66,7 +67,7 @@ sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
 The stdlib suites and supplemental Pytest cases cover synthetic behavior,
 faults and boundary conditions. Exact tested-source evidence belongs to the
-[5.10.0 release record](docs/RELEASE-5.10.0.md), not a timeless test-count promise.
+[release records](docs/RELEASE-5.11.0.md), not a timeless test-count promise.
 Statement/branch coverage does not prove correctness or qualify a live deployment.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).
@@ -80,11 +81,26 @@ python3 -B yggctl/main.py --help
 Help emits a run-summary entry to the local syslog. Do not try other commands
 on a production host without reviewing their effects and dependencies.
 
+## Stored-history trend
+
+`trend [hours] [json]` accepts integer hours 1..72 (default 24); `json` must
+come last, with no duplicated arguments. It reads the bounded local metrics
+file, never calls the admin API and changes no gate, queue, timer or network
+policy. Access still requires a readable file; unreadable role-owned data needs
+reviewed privilege provisioning, not relaxed permissions.
+
+The report compares equal sample-count halves, not equal elapsed-time halves.
+Availability is conditional on **present rows with a strict boolean state**;
+answered, absent and invalid-state counts are separate. Missing observations
+are not invented down peers. RTT is protocol router-response EWMA, not link or
+application delay. Sanitized endpoint labels are not verified peer identities.
+
 ## Documentation
 
 * [Architecture and external integration](docs/ARCHITECTURE.md)
 * [Security policy](SECURITY.md) and [operational limitations](docs/SECURITY.md)
 * [Verification scope](docs/VERIFICATION.md)
+* [Source 5.11.0 trend contract](docs/RELEASE-5.11.0.md)
 * [Source 5.10.0 contracts and qualification](docs/RELEASE-5.10.0.md)
 * [Contributing](CONTRIBUTING.md) and [development boundaries](DEVELOPMENT.md)
 * [Changelog](CHANGELOG.md) and [third-party references](THIRD_PARTY.md)
