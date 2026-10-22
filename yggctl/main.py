@@ -452,6 +452,10 @@ def journal_records(data):
             ) or re.search(r"\\u[0-9a-fA-F]{4}", probe):
                 message = "[REDACTED sensitive journal message]"
                 event("state", "journal_redaction", "message_omitted")
+            else:
+                # A journal line can carry a peer URI with userinfo or a private path
+                # without any keyword. Apply the same output boundary as console/config.
+                message = public_config(message)
             unit = row.get("_SYSTEMD_UNIT")
             at = row.get("__REALTIME_TIMESTAMP", "")
             records.append(

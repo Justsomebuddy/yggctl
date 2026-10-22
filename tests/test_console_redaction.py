@@ -98,3 +98,45 @@ class ConsoleRedaction(ConsoleFixture):
             public_config("tls://peer.example:443/path?token=" + MARKER),
             "tls://peer.example:443",
         )
+
+    @logged
+    def test_journal_records_apply_the_uri_boundary(self):
+        # Keywords are not the only way a credential reaches a journal line.
+        for message, expected in (
+            ("peer dial failed " + IPV4 + "?password=" + MARKER, None),
+            ("peer dial failed tls://peer.example:443/private/" + MARKER, "tls://peer.example:443"),
+            (
+                "peer dial failed https://user:" + MARKER + "@example.test/p",
+                "https://[REDACTED]@example.test/p",
+            ),
+            ("peer dial failed tls://user%40host:" + MARKER + "@192.0.2.1:443", IPV4),
+        ):
+            with self.subTest(message=message):
+                raw = json.dumps(
+                    {
+                        "_SYSTEMD_UNIT": "yggdrasil-lab.service",
+                        "__REALTIME_TIMESTAMP": "1",
+                        "MESSAGE": message,
+                    }
+                )
+                record = main.journal_records(raw)[0]
+                self.assertNotIn(MARKER, record["message"])
+                if expected:
+                    self.assertIn(expected, record["message"])
+        keyword = json.dumps({"MESSAGE": "password=" + MARKER})
+        self.assertEqual(
+            main.journal_records(keyword)[0]["message"], "[REDACTED sensitive journal message]"
+        )
+
+    @logged
+    def test_mixed_safe_and_hostile_query_parameters(self):
+        for raw in (
+            IPV4 + "?key=" + "a" * 64 + "&password=" + MARKER,
+            IPV6 + "?PASSWORD=" + MARKER,
+            IPV4 + "?password=" + MARKER + "?token=" + MARKER,
+            IPV4 + "?password=" + MARKER + "\x00",
+            "tls://user%40host:" + MARKER + "@192.0.2.1:443",
+        ):
+            with self.subTest(raw=raw):
+                clean = json.dumps(public_config({"remote": raw, "last_error": "dial " + raw}))
+                self.assertNotIn(MARKER, clean)
