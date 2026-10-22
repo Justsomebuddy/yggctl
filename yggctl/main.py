@@ -747,7 +747,10 @@ def main():
     except KeyboardInterrupt:
         print("FAIL interrupted; rollback attempted if transaction active", file=sys.stderr)
         return 130
-    print(f"[done] errors=0 elapsed={time.monotonic() - start:.2f}s")
+    summary_stream = (
+        sys.stderr if args.command == "trend" and args.args[-1:] == ["json"] else sys.stdout
+    )
+    print(f"[done] errors=0 elapsed={time.monotonic() - start:.2f}s", file=summary_stream)
     return 0
 
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Keep successful `trend [hours] json` stdout to one parseable JSON document by
+  moving its `[done]` run summary to stderr. Text trend and other commands retain
+  their stdout summary; failed trends retain their existing stderr failure output.
+
 ## [5.11.0] - 2026-10-22
 
 - Add read-only `trend [hours] [json]` over bounded stored metrics (#42/#43).
