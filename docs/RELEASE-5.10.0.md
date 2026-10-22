@@ -93,7 +93,9 @@ without blind resend; no accepted history or cursor is silently reset.
 3. After 5.10 publication, the deployment hook conservatively **refuses automatic
    5.10→5.9 downgrade**, including when the queue is currently marker-free. This
    closes the old-writer/marker race rather than claiming automatic rollback.
-4. On refusal/failure retain candidate, manifest, queue/cursor and exact preimages.
+4. On refusal/failure, preserve the reached runtime bytes/manifest, queue/cursor
+   and exact preimages. After partial publication those bytes may be mixed:
+   affected workers must remain stopped until coherent repair and verification.
    Require a separately reviewed, quiesced recovery plan before changing format
    readers/writers. Do not clear queues, reset cursors, silently discard markers
    or report rollback success merely because old files are available.
