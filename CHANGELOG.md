@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Treat duplicate public peer labels as ambiguous observations for alert tracking.
+  Different WebSocket paths at one endpoint can share a redacted label: preserve
+  their prior tracking and pending events instead of emitting false recovery or
+  reconnect alerts. Other peers continue normally. `collect` records the fixed
+  `ambiguous_peer_labels` diagnostic and returns degraded status; private URI
+  paths remain omitted. Existing queue IDs, payloads and cursors are unchanged.
+
 ## [5.11.1] - 2026-10-23
 
 - Keep successful `trend [hours] json` stdout to one parseable JSON document by
