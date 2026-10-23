@@ -224,7 +224,8 @@ class AtlasExportRecovery(ObservedFixture):
                     if kind == "mode":
                         temporary.chmod(0o644)
                     elif kind == "hardlink":
-                        link = self.root / "linked"
+                        # Keep the second name outside the scanned export directory.
+                        link = self.paths.state / "linked"
                         link.hardlink_to(temporary)
                 owner = patch.object(analysis.os, "geteuid", return_value=os.geteuid() + 1)
                 with (
@@ -237,6 +238,7 @@ class AtlasExportRecovery(ObservedFixture):
                 temporary.unlink()
                 other.unlink()
                 if kind == "hardlink":
+                    self.assertEqual(link.read_text(), "abandoned")
                     link.unlink()
 
     @logged
