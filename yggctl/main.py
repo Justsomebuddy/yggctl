@@ -70,6 +70,7 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
 Тревоги:      пир недоступен 10+ минут, нестабилен (3+ разрыва за час) или вернулся, сбой ноды —
               в SimpleX, пока notify включён.
 Журнал:       одна строка на запуск; след вызовов — при сбое или с --trace.
+              events: 1..72 часа (по умолчанию 6), до 1000 последних событий; усечение явно показано.
 Коды выхода:  0 — успех или показ изменения; 1 — сбой; 2 — ошибка аргументов; 77 — нужен root.
 """
 
@@ -496,9 +497,14 @@ def unicode_escape(match):
     return chr(int(match[1], 16))
 
 
+EVENT_RECORD_LIMIT = 1000
+
+
 @logged
 def do_logs(ctx, args, a):
-    n = bounded_number(a[0], 1, 1000) if a else 50
+    hours = (bounded_number(a[0], 1, 72) if a else 6) if args.command == "events" else None
+    # One extra record distinguishes an exactly full window from truncation.
+    n = EVENT_RECORD_LIMIT + 1 if hours is not None else bounded_number(a[0], 1, 1000) if a else 50
     command = [
         "/usr/bin/journalctl",
         "-u",
@@ -511,9 +517,27 @@ def do_logs(ctx, args, a):
         "-n",
         str(n),
     ]
-    if args.command == "events":
-        command += ["--since", f"{bounded_number(a[0], 1, 72) if a else 6} hours ago"]
-    output({"logs": journal_records(ctx.run(command).stdout)})
+    if hours is not None:
+        command += ["--since", f"{hours} hours ago"]
+    records = journal_records(ctx.run(command).stdout)
+    if hours is not None:
+        truncated = len(records) > EVENT_RECORD_LIMIT
+        if truncated:
+            print(
+                "WARN events_truncated:limit=1000; showing newest records in window",
+                file=sys.stderr,
+            )
+        output(
+            {
+                "window_hours": hours,
+                "limit": EVENT_RECORD_LIMIT,
+                "returned": min(len(records), EVENT_RECORD_LIMIT),
+                "truncated": truncated,
+                "logs": records[-EVENT_RECORD_LIMIT:],
+            }
+        )
+    else:
+        output({"logs": records})
 
 
 @logged
