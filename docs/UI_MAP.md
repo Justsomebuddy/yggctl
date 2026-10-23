@@ -1,6 +1,6 @@
 # Historical report interaction contract
 
-Current source: **5.10.0**. Earlier dated sections below describe historical
+Current source: **5.11.1**. Earlier dated sections below describe historical
 behavior; the final section defines the current changed CLI contracts.
 
 ## 2026-10-20 — source 5.7.5
@@ -134,11 +134,11 @@ Existing stats/graph behavior and history schema are unchanged. Source tests use
 synthetic fixtures; they do not verify external network-stand, performance,
 installed-runtime or upstream measurement claims. See [release scope](RELEASE-5.11.0.md).
 
-## Events window and bounded output (unreleased)
+## Events window and bounded output (5.11.1; 2026-10-23)
 
 | ID | Invocation | Expected result | Bounds and failure behavior |
 | --- | --- | --- | --- |
 | CLI-EVENTS-WINDOW | `events [1..72 hours]`, default 6; existing root requirement | Query matching node/stack journal entries since the requested time; hours never double as a line count | Read-only; no service or journal mutation. `logs [N]` remains unchanged. |
-| CLI-EVENTS-LIMIT | More than 1000 matching records | Return newest 1000 in chronological order; `truncated=true` plus `WARN events_truncated` on stderr | Query at most 1001 records as a bounded overflow probe; omitted count is unknown. Narrow the time window or use a reviewed external journal query for omitted history. Successful bounded inspection remains rc0, not a completeness guarantee. |
+| CLI-EVENTS-LIMIT | More than 1000 matching records | Return newest 1000 in journal-provided order (no independent realtime sorting); `truncated=true` plus `WARN events_truncated` on stderr | Query at most 1001 records as a bounded overflow probe; omitted count is unknown. Narrow the time window or use a reviewed external journal query for omitted history. Successful bounded inspection remains rc0, not a completeness guarantee. |
 | CLI-EVENTS-OUTPUT | Empty, partial or exactly full window | Preserve `logs`; add `window_hours`, `limit=1000`, `returned`, `truncated` | Exactly 1000 returns `truncated=false`; metadata describes records returned by journalctl under current access/retention, not proof of a complete historical journal. Existing human completion line remains on stdout. |
 | CLI-EVENTS-FAILURE | Invalid hours, journal command/byte/time failure, malformed journal JSON | Existing nonzero failure; no partial log projection presented as successful | Existing message redaction applies before output, including the overflow record. No extra privileges, unbounded reads or relaxation of byte/time caps. |

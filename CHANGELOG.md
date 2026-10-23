@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [5.11.1] - 2026-10-23
 
 - Keep successful `trend [hours] json` stdout to one parseable JSON document by
   moving its `[done]` run summary to stderr. Text trend and other commands retain
@@ -11,6 +11,10 @@
   Probe at most 1001 records to distinguish a full result from truncation;
   existing command byte/time bounds and journal redaction remain in force.
   `logs [N]` keeps its existing line-count contract.
+
+- Add independent stream/trace/failure and event ordering/redaction/resource-bound
+  regressions; clarify historical external SimpleX provisioning without reviving
+  the superseded shared-wrapper sender. See [qualification](docs/RELEASE-5.11.1.md).
 
 ## [5.11.0] - 2026-10-22
 

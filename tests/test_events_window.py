@@ -30,6 +30,7 @@ class EventsWindow(ConsoleFixture):
         ]
         commands = []
 
+        @logged
         def journal(argv, **kwargs):
             commands.append(argv)
             if failure:
