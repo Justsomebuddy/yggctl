@@ -2,13 +2,17 @@
 
 from typing import Any
 
+import contextlib
+import fcntl
 import json
 import math
+import os
 import re
+import stat
 import time
 import uuid
 
-from core import Failure, logged, timestamp, atomic
+from core import Failure, logged, timestamp, atomic, event
 from research import model, metrics
 from . import acquisition
 
@@ -344,16 +348,67 @@ def markdown(data):
     return "\n".join(lines) + "\n"
 
 
-@logged
-def report(ctx, store):
-    from .viewer import html
+@contextlib.contextmanager
+def export_locked(root):
+    """Serialize Atlas export scans and writes without taking the SQLite writer lock."""
+    event("entry", "atlas_export_locked")
+    try:
+        event("external_start", "atlas_export_open")
+        try:
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            event("external_error", "atlas_export_open", type(exc).__name__)
+            raise
+        event("external_exit", "atlas_export_open", "success")
+        try:
+            event("external_start", "atlas_export_flock")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                event("external_error", "atlas_export_flock", "BlockingIOError")
+                event("state", "atlas_export_lock", "busy")
+                raise Failure("atlas_export_busy") from None
+            except OSError as exc:
+                event("external_error", "atlas_export_flock", type(exc).__name__)
+                raise
+            event("external_exit", "atlas_export_flock", "success")
+            event("state", "atlas_export_lock", "acquired")
+            yield
+        finally:
+            event("external_start", "atlas_export_close")
+            try:
+                os.close(fd)
+            except OSError as exc:
+                event("external_error", "atlas_export_close", type(exc).__name__)
+                raise
+            event("external_exit", "atlas_export_close", "success")
+            event("state", "atlas_export_lock", "closed")
+    except BaseException as exc:
+        event("error", "atlas_export_locked", type(exc).__name__)
+        raise
+    else:
+        event("exit", "atlas_export_locked", "success")
 
-    start = time.monotonic()
-    count = 0
-    for i, path in enumerate(store.root.iterdir()):
+
+@logged
+def scan_exports(root):
+    count, abandoned = 0, []
+    # Complete validation precedes every unlink, including retention failures.
+    for i, path in enumerate(root.iterdir()):
         if i >= 512:
             raise Failure("atlas_export_directory_guard")
         if path.name in ("atlas.sqlite", "atlas.sqlite-wal", "atlas.sqlite-shm", ".writer.lock"):
+            continue
+        if re.fullmatch(r"\.yggctl-[a-z0-9_]{8}", path.name):
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+            ):
+                raise Failure("atlas_unsafe_temporary_file")
+            abandoned.append(path)
             continue
         if (
             not re.fullmatch(r"atlas-[0-9a-f]{32}\.(json|md|dot|html)", path.name)
@@ -364,6 +419,23 @@ def report(ctx, store):
         count += 1
     if count + 4 > 256:
         raise Failure("atlas_export_retention_review_required")
+    for path in abandoned:
+        path.unlink()
+        event("state", "atlas_export", "abandoned_atomic_removed")
+
+
+@logged
+def report(ctx, store):
+    with export_locked(store.root):
+        return _report_locked(ctx, store)
+
+
+@logged
+def _report_locked(ctx, store):
+    from .viewer import html
+
+    start = time.monotonic()
+    scan_exports(store.root)
     print("[1/3] consistent atlas read; processed=0/3 remaining=3", flush=True)
     data = build(store)
     data["changes"] = (

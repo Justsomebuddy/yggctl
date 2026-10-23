@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- Recover interrupted Atlas exports on the next `atlas report`: validate the
+  bounded export directory before removing only private, single-link temporary
+  files matching the console's reserved atomic-write pattern. Preserve completed
+  reports and reject unknown or unsafe entries. Hold a separate directory lock
+  through validation, recovery and publication; overlapping reports fail with
+  `atlas_export_busy` and can retry after the active report finishes. Atlas
+  acquisition and the metrics collector retain their independent locks.
+  See the [report recovery contract](docs/UI_MAP.md#atlas-export-recovery).
+
 ## [5.11.1] - 2026-10-23
 
 - Keep successful `trend [hours] json` stdout to one parseable JSON document by

@@ -1,7 +1,37 @@
 # Historical report interaction contract
 
-Current source: **5.11.1**. Earlier dated sections below describe historical
-behavior; the final section defines the current changed CLI contracts.
+Released source: **5.11.1**. Earlier dated sections below describe historical
+behavior. The following Atlas section describes an unreleased change.
+
+## Atlas export recovery
+
+`atlas report` retains its existing prerequisites: a valid private Atlas store,
+the integrity check and a consistent SQLite read snapshot. Successful output
+still names the four JSON/Markdown/DOT/HTML files and reports observed counts;
+world coverage remains unknown.
+
+The process holds an exclusive nonblocking directory lock from export validation
+through cleanup and all four writes. A simultaneous report fails explicitly with
+`atlas_export_busy`; retry after the active report finishes. This lock is separate
+from the Atlas database writer and collector locks, so it does not serialize
+catalogue acquisition, crawling or collection behind report generation.
+
+After a crashed export, the next report validates the entire bounded directory
+before deleting abandoned atomic-write files. Only reserved `.yggctl-` names
+with eight lowercase letters/digits/underscores, regular-file type, current
+effective UID, mode `0600` and one hard link qualify. Unknown entries, unsafe
+temporary files, directory limits and retention limits still fail closed; an
+unsafe temporary gives `atlas_unsafe_temporary_file`. Cleanup errors abort the
+report. Temporary data is discarded, never imported as observations or promoted
+to a finished report. Completed reports and the SQLite database are preserved.
+
+All cooperating exporters must use this lock. Quiesce old report processes
+before adopting the change; it cannot protect a concurrent older or external
+writer that ignores the lock. This source change does not update an installed
+integrity manifest or authorize deployment. Four files are still published
+individually: an interrupted report can leave an incomplete completed-file set,
+and a retry creates a new report rather than completing that set. Retention
+remains an explicit operator review, not automatic deletion of finished reports.
 
 ## 2026-10-20 — source 5.7.5
 
