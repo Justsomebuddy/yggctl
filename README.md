@@ -1,8 +1,10 @@
-> Source **5.11.0** adds a read-only stored-history `trend [hours] [json]` report.
-> History is unverified and role-writable; trend verdicts are policy heuristics,
-> not live health, authenticity or delivery evidence. See the
-> [5.11.0 contract](docs/RELEASE-5.11.0.md); earlier recovery/migration rules remain
-> in the [5.10.0 record](docs/RELEASE-5.10.0.md).
+> Source **5.11.1** fixes `trend [hours] json` stream separation and makes
+> `events [hours]` lookback independent of its bounded record count.
+> History remains unverified and role-writable; bounded reports are not live
+> health, authenticity, complete-history or delivery evidence. See the
+> [5.11.1 contract](docs/RELEASE-5.11.1.md), the
+> [5.11.0 trend contract](docs/RELEASE-5.11.0.md) and earlier
+> [5.10.0 recovery/migration rules](docs/RELEASE-5.10.0.md).
 
 # yggctl
 
@@ -67,7 +69,7 @@ sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
 The stdlib suites and supplemental Pytest cases cover synthetic behavior,
 faults and boundary conditions. Exact tested-source evidence belongs to the
-[release records](docs/RELEASE-5.11.0.md), not a timeless test-count promise.
+[release records](docs/RELEASE-5.11.1.md), not a timeless test-count promise.
 Statement/branch coverage does not prove correctness or qualify a live deployment.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).
@@ -95,11 +97,30 @@ answered, absent and invalid-state counts are separate. Missing observations
 are not invented down peers. RTT is protocol router-response EWMA, not link or
 application delay. Sanitized endpoint labels are not verified peer identities.
 
+## Report output streams and event windows
+
+Successful `trend [hours] json` writes exactly one JSON document to stdout;
+its human `[done]` summary goes to stderr. An `insufficient_history` report
+uses the same stream contract. Failures remain nonzero with `FAIL` on stderr,
+not an empty successful JSON report. Do not merge stderr into a JSON parser's
+input. Text-mode trend output keeps its existing completion line on stdout.
+
+`events [hours]` accepts 1..72 hours (default 6), independently of its visible
+limit of 1000 newest matching journal records. A bounded 1001-record query
+probes overflow: more than 1000 sets `truncated=true` and emits
+`WARN events_truncated` on stderr; exactly 1000 does not. The result preserves
+journal order and adds `window_hours`, `limit`, `returned` and `truncated`
+alongside `logs`. Event output retains its existing human completion line on
+stdout; this is not the machine-only trend JSON contract. Message redaction,
+command byte/time bounds and `logs [N]` remain unchanged. Bounded success is not
+proof of complete journal history under current access and retention.
+
 ## Documentation
 
 * [Architecture and external integration](docs/ARCHITECTURE.md)
 * [Security policy](SECURITY.md) and [operational limitations](docs/SECURITY.md)
 * [Verification scope](docs/VERIFICATION.md)
+* [Source 5.11.1 report-output contract](docs/RELEASE-5.11.1.md)
 * [Source 5.11.0 trend contract](docs/RELEASE-5.11.0.md)
 * [Source 5.10.0 contracts and qualification](docs/RELEASE-5.10.0.md)
 * [Contributing](CONTRIBUTING.md) and [development boundaries](DEVELOPMENT.md)

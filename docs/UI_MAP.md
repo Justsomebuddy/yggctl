@@ -1,6 +1,6 @@
 # Historical report interaction contract
 
-Current source: **5.10.0**. Earlier dated sections below describe historical
+Current source: **5.11.1**. Earlier dated sections below describe historical
 behavior; the final section defines the current changed CLI contracts.
 
 ## 2026-10-20 — source 5.7.5
@@ -118,7 +118,7 @@ historical projections; it is not a blanket ban or a data-flow proof.
 
 | ID | Invocation / precondition | Visible result / side effects | Error / interpretation limit |
 |---|---|---|---|
-| CLI-TREND | `trend [hours] [json]`; default 24, integer 1..72 | Text or JSON report; no API request or file write; existing gates/alerts unchanged | `json` must be last; duplicate hours/format or out-of-range arguments fail. File must be readable; otherwise existing privilege check applies. |
+| CLI-TREND | `trend [hours] [json]`; default 24, integer 1..72 | Text report and `[done]` on stdout. With final `json`, stdout is exactly one JSON report (including `insufficient_history`) and the successful `[done]` summary goes to stderr. No API request or file write; existing gates/alerts unchanged. `--trace` logs through the existing trace channel. | `json` must be last; duplicate hours/format or out-of-range arguments fail. File must be readable; otherwise existing privilege check applies. Failed trend commands emit `FAIL` on stderr with no JSON or success summary on stdout. |
 | CLI-TREND-SPLIT | Bounded `metrics.jsonl` window | Sort timestamps; equal oldest/newest **sample-count** halves; drop odd middle row; median/MAD comparisons | Not equal elapsed-time halves, time-weighted uptime, statistical confidence or a live health gate. Duplicate rows still weight metrics; distinct timestamp count is shown. |
 | CLI-TREND-LIMIT | Fewer than 8 distinct timestamps, span <30 min, no observed sample, >25% unknown observations, stale collector, malformed peer container, or no comparable observed metric | Aggregate `insufficient_history` with explicit reasons; individual metric detail retained | Error-free sample share alone cannot establish stable observed connectivity. No samples in the window remains the existing controlled failure. |
 | CLI-TREND-FUTURE | Any valid future timestamp in the same bounded history snapshot | `future_samples` count, `collector=future_timestamp`, `future_samples_present`; aggregate insufficient | Future samples excluded from metric window, not silently accepted as fresh evidence. Future-only history cannot yield a report. No second history read. |
@@ -133,3 +133,12 @@ historical projections; it is not a blanket ban or a data-flow proof.
 Existing stats/graph behavior and history schema are unchanged. Source tests use
 synthetic fixtures; they do not verify external network-stand, performance,
 installed-runtime or upstream measurement claims. See [release scope](RELEASE-5.11.0.md).
+
+## Events window and bounded output (5.11.1; 2026-10-23)
+
+| ID | Invocation | Expected result | Bounds and failure behavior |
+| --- | --- | --- | --- |
+| CLI-EVENTS-WINDOW | `events [1..72 hours]`, default 6; existing root requirement | Query matching node/stack journal entries since the requested time; hours never double as a line count | Read-only; no service or journal mutation. `logs [N]` remains unchanged. |
+| CLI-EVENTS-LIMIT | More than 1000 matching records | Return newest 1000 in journal-provided order (no independent realtime sorting); `truncated=true` plus `WARN events_truncated` on stderr | Query at most 1001 records as a bounded overflow probe; omitted count is unknown. Narrow the time window or use a reviewed external journal query for omitted history. Successful bounded inspection remains rc0, not a completeness guarantee. |
+| CLI-EVENTS-OUTPUT | Empty, partial or exactly full window | Preserve `logs`; add `window_hours`, `limit=1000`, `returned`, `truncated` | Exactly 1000 returns `truncated=false`; metadata describes records returned by journalctl under current access/retention, not proof of a complete historical journal. Existing human completion line remains on stdout. |
+| CLI-EVENTS-FAILURE | Invalid hours, journal command/byte/time failure, malformed journal JSON | Existing nonzero failure; no partial log projection presented as successful | Existing message redaction applies before output, including the overflow record. No extra privileges, unbounded reads or relaxation of byte/time caps. |

@@ -4,6 +4,18 @@
 The shared bridge itself remains unchanged for its other consumers. The audit
 below describes the old implementation, not the new adapter.
 
+## Provisioning and source availability (#1)
+
+The historical `simplex-alert.sh` is an external deployment component, not a
+file this repository installs or generates when the console starts. This
+repository does not provision its secrets, contacts or SimpleX profile. The
+algorithm below is a sanitized behavioral audit, **not an executable template
+or an installation recipe**; the follow-up discussion is in [issue #9](https://github.com/Justsomebuddy/yggctl/issues/9).
+Since source 5.9.0 the Ygg forwarder instead uses the published
+[`simplex_sender.py`](../yggctl/simplex_sender.py) adapter under the
+[required external native-handoff integration](NATIVE_HANDOFF.md). Source
+publication does not provision that integration or change the shared bridge.
+
 # Actual SimpleX bridge contract (issue #9)
 
 This describes the existing deployment bridge, not a new sender backend or an
