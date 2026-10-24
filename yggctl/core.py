@@ -215,31 +215,42 @@ def bounded_process(
 
 @logged
 def attached_process(argv, *, stop):
-    """Run a long child on this terminal's stdio. If this process is interrupted, stop
-    the child's unit first, then wait for the child to exit."""
+    """Run a long child on this terminal's stdio and stop its unit on failure."""
     env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
     # Security review: caller supplies reviewed argv; shell execution is not enabled
     proc = subprocess.Popen(argv, env=env, close_fds=True)  # nosec B603
-    try:
-        return proc.wait()
-    except BaseException:
+
+    @logged
+    def cleanup():
         try:
-            # Security review: caller supplies reviewed argv; shell execution is not enabled
-            subprocess.run(  # nosec B603
-                stop,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-                check=False,
-            )
+            try:
+                # Security review: caller supplies reviewed argv; shell execution is not enabled
+                subprocess.run(  # nosec B603
+                    stop,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                # Preserve the launcher status or original interruption; stop may fail.
+                event("external_error", "attached_unit_stop", type(exc).__name__)
         finally:
             try:
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+    try:
+        rc = proc.wait()
+    except BaseException:
+        cleanup()
         raise
+    if rc:
+        cleanup()
+    return rc
 
 
 @dataclasses.dataclass(frozen=True)

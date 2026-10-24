@@ -254,3 +254,19 @@ state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
 `state_acl_unavailable`. Missing parent state is an error, not auto-provisioning.
 No implicit permission repair or queue reset occurs. Read-only historical output
 remains unverified; see [the exact custody scope](STATE_CUSTODY.md).
+
+## Attached worker failure (unreleased)
+
+Sandboxed Research, Atlas and remote commands retain their existing invocation,
+roles and admission checks. If `systemd-run` returns nonzero or dies by signal,
+the live parent now requests a stop of that command's exact transient unit and
+reaps the launcher before leaving the broker/lock scope. The original failure
+status remains nonzero; current successful output is unchanged. Each stop and
+subsequent launcher wait remains bounded by the existing 30-second timeout.
+
+This does not undo data committed before cancellation. With an available service
+manager, the tested early-launcher-failure case no longer permits the old capture
+to publish after a new invocation. Parent SIGKILL and failed/unavailable manager
+cleanup remain separate limits: neither a returned CLI error nor a released
+console lock proves all role workers have stopped. See [worker lifecycle scope]
+(WORKER_IDENTITY.md#unsuccessful-launcher-exit-unreleased).
