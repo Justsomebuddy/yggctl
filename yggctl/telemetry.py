@@ -9,6 +9,7 @@ import secrets
 import stat
 import statistics
 import time
+from collections import Counter
 from typing import Any
 
 from core import (
@@ -37,6 +38,15 @@ def peer_label(value):
     must stay stable. Rendering applies this boundary again for legacy alerts.
     """
     return public_peer_uri(value) or "unknown-peer"
+
+
+@logged
+def ambiguous_peer_labels(peers):
+    """Public labels are display-safe, but do not uniquely identify every link."""
+    counts = Counter(
+        peer_label(p["r"]) for p in peers if isinstance(p.get("r"), str) and p.get("r")
+    )
+    return {label for label, count in counts.items() if count > 1}
 
 
 @logged
@@ -460,16 +470,26 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
         if isinstance(p.get("r"), str) and p.get("r")
     ]
     uptimes = {peer_label(k): v for k, v in (uptimes or {}).items()}
+    ambiguous = ambiguous_peer_labels(peers)
     up, total = sum(bool(p.get("up")) for p in peers), len(peers)
     changes, tracked = [], {}
-    for p in peers:
+    observed = [p for p in peers if p["r"] not in ambiguous]
+    # Do not let one link recover another link's episode or teach its uptime.
+    # Retain durable tracking across ambiguity, just as across a missing query,
+    # without withholding observations for unrelated unambiguous peers.
+    for label in ambiguous:
+        if isinstance(down.get(label), dict):
+            tracked[label] = dict(down[label], observation_gap=True)
+    if ambiguous:
+        event("state", "peer_observation", "ambiguous_labels_tracking_retained")
+    for p in observed:
         entry = candidate if isinstance(candidate := down.get(p["r"]), dict) else {}
         try:
             since = dt.datetime.fromisoformat(entry.get("since", sample["ts"]))
         except (TypeError, ValueError):
             since = now
         uncertain = bool(entry.get("observation_gap")) or gap
-        if gap and not entry.get("alerted"):
+        if uncertain and not entry.get("alerted"):
             # No uninterrupted downtime can be proved across a missing query.
             # Keep already-alerted episodes to avoid a duplicate down event,
             # but start a fresh confirmation interval for unalerted episodes.
@@ -505,8 +525,13 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
         if alerted and uncertain:
             tracked[p["r"]]["observation_gap"] = True
     new_starts, new_unstable = reconnects(
-        starts, unstable, uptimes or {}, now, peers, up, total, changes
+        starts, unstable, uptimes or {}, now, observed, up, total, changes
     )
+    for label in ambiguous:
+        if label in starts:
+            new_starts[label] = starts[label]
+        if label in unstable:
+            new_unstable[label] = unstable[label]
     pending = state.get("pending", [])
     enqueue = bool(changes) and notify_state(ctx) == "on"
     if enqueue:
@@ -771,6 +796,8 @@ def collect(ctx):
             sample["errors"].append(str(exc) if isinstance(exc, Failure) else "metric_unavailable")
         if sample["up"] == 0 or sample["stack_up"] == 0:
             sample["errors"].append("no_up_peers")
+        if ambiguous_peer_labels(sample["peers"]):
+            sample["errors"].append("ambiguous_peer_labels")
         metric_failed = False
         try:
             append(ctx, "metrics.jsonl", sample)
