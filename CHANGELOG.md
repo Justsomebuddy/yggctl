@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased: outbound QUIC runtime evidence
+
+- Correlate owned UDP sockets with a unique original-direction IPv4 conntrack
+  tuple and an active configured QUIC peer with the expected key. Include
+  unconnected UDP sockets in `ss` observations; reject unmatched, shared or
+  ambiguous sockets and contradictory mode marks, even beside valid TCP.
+- Admit only these proven outbound QUIC sockets alongside the existing loopback
+  SOCKS listener. Keep rejection of additional TCP and unproven UDP listeners.
+  This is sampled diagnostic evidence, not a VPN routing or packet-history proof.
+  See [QUIC operator behavior](docs/UI_MAP.md#outbound-quic-runtime-evidence).
+
 ## [5.12.0] - 2026-10-24
 
 - Treat duplicate public peer labels as ambiguous observations for alert tracking.

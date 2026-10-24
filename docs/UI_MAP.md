@@ -1,5 +1,32 @@
 # Historical report interaction contract
 
+## Outbound QUIC runtime evidence
+
+`check`, mode status and `mode direct|tunnel` retain their existing prerequisites.
+An unchanged-mode request still probes runtime state without restarting services.
+QUIC URI acceptance now agrees with the socket and underlay gates: a process-owned
+UDP UNCONN socket may contribute only when its local port/bind has a unique
+original-direction IPv4 conntrack tuple to an active configured QUIC peer with
+its pinned key. Compare the daemon's query-free remote URI with the configured
+endpoint/path; do not require the daemon to echo query parameters.
+
+Successful QUIC proof no longer needs a TCP peer. Removing the last TCP peer
+leaves proven QUIC evidence usable. The listener gate still requires the single
+STACK TCP listener on 127.0.0.1:1080 and rejects additional TCP listeners.
+Unknown, shared, malformed or ambiguously matched own UDP sockets refuse with
+`underlay_quic_*`; an unexpected destination/key or mode mark cannot be hidden
+by a good TCP socket. Direct expects mark3905; tunnel preserves the existing
+predicate mark !=3905, including nonzero marks. No addresses or keys are printed
+in new diagnostics. Own connections count observed sockets, not delivered packets.
+
+The proof samples ss, conntrack and admin API sequentially. Connection churn,
+expired/stale records or reused/shared UDP ports may require retry after
+convergence; an indistinguishable reused tuple is not historical FD attestation.
+This does not establish actual VPN routing, absence of every leak or future
+packet safety. No firewall rules, permissions or service configuration change.
+Deployers must review the changed checks.py hash in their integrity manifest.
+Compensation/recovery still retains its journal when proof refuses.
+
 ## Health alert recovery (unreleased)
 
 With notifications on, `collect` saves a degraded observation's hourly health
