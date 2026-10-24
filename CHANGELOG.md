@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+- Add opt-in `privacy status|off|estimate|on` managed in a validated 0600 posture
+  file that is disabled by default. `estimate` reports padding overhead, mixing
+  delay median/p95 and cover bitrate for a measured path; `on` refuses a posture
+  whose observed crowd is below the anonymity-set minimum or whose padding
+  exceeds the profile budget, unless `--force` is passed. Enabling privacy while
+  logging private flows remains impossible. This is posture management only: no
+  packet padding, no daemon change, no network request. See the
+  [interaction contract](docs/UI_MAP.md#opt-in-privacy-posture-unreleased-2026-10-24).
+
+
 ## [5.12.2] - 2026-10-25
 
 - Do not compare stored-history trends for a sanitized peer label that covers

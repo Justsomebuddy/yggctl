@@ -34,6 +34,7 @@ from core import (
 )
 import checks
 import management
+import privacy
 import telemetry
 import recovery
 import sandbox
@@ -50,7 +51,9 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
               stack-start, stack-stop, stack-restart, stack-enable, stack-disable;
               add-peer URI [--force] [--apply], remove-peer IPv4:порт [--apply],
               add-peer принимает только IPv4-литерал и обязательный ?key=HEX64; меняет оба инстанса.
-              mode direct|tunnel [--apply], recover-transaction [--apply].
+              mode direct|tunnel [--apply], recover-transaction [--apply],
+              privacy status|off|estimate ПРОФИЛЬ|on ПРОФИЛЬ [участники] [Мбит/с] [чанк] [--force]
+              — приватность выключена по умолчанию; оценка цены и порог anonymity set.
               Без --apply изменение только показывается.
 Восстановление: snapshot, diff [файл], backup [--full --recipient ОТПЕЧАТОК], restore ФАЙЛ (только просмотр; --apply отключён), doctor
 Исследования: research capture|map [ID]|diff [ранний ID]|report [1..72 часа] — снимки своей ноды
@@ -364,6 +367,42 @@ def do_peer(ctx, args, a):
 
 
 @logged
+def do_privacy(ctx, args, a):
+    # Posture only: no packet handling, no daemon change, no network request.
+    if not a:
+        raise Failure("privacy_action_required")
+    action = a[0]
+    if action == "status":
+        output(privacy.load(ctx))
+        return
+    if action == "off":
+        values = privacy.load(ctx)
+        values["enabled"] = False
+        output(privacy.save(ctx, values))
+        return
+    if action == "estimate":
+        if len(a) < 2:
+            raise Failure("privacy_profile_required")
+        chunk = bounded_number(a[2], 1, 1 << 20) if len(a) > 2 else 1280
+        mbps = bounded_number(a[3], 0, 100000) if len(a) > 3 else 87
+        rtt = bounded_number(a[4], 0, 60000) if len(a) > 4 else 56
+        output(privacy.estimate(a[1], chunk, mbps, rtt))
+        return
+    if action == "on":
+        if len(a) < 2:
+            raise Failure("privacy_profile_required")
+        participants = bounded_number(a[2], 0, 1000000) if len(a) > 2 else 0
+        mbps = bounded_number(a[3], 0, 100000) if len(a) > 3 else 87
+        chunk = bounded_number(a[4], 1, 1 << 20) if len(a) > 4 else 1280
+        result = privacy.enable(ctx, a[1], participants, mbps, chunk, args.force)
+        output(result)
+        if result.get("refused"):
+            raise Failure("privacy_refused")
+        return
+    raise Failure("unknown_privacy_action")
+
+
+@logged
 def do_recover(ctx, args, a):
     management.recover_transaction(ctx, args.apply)
 
@@ -662,6 +701,7 @@ COMMANDS = {
     "add-peer": Command(do_peer, most=-1, flags=frozenset({"apply", "force"})),
     "remove-peer": Command(do_peer, most=-1, flags=APPLY),
     "recover-transaction": Command(do_recover, flags=APPLY),
+    "privacy": Command(do_privacy, most=-1, flags=frozenset({"force"})),
     "collect": Command(do_collect),
     "watch": Command(do_watch, most=2),
     "top": Command(do_watch, most=2),

@@ -350,3 +350,11 @@ existing journal is retained. Restore the intended policy/runtime evidence and
 retry recovery; do not delete the journal to bypass proof. No automatic network
 repair, new journal format or installation change is introduced. The changed
 checks.py hash needs review in the external deployment integrity manifest.
+
+## Opt-in privacy posture (unreleased, 2026-10-24)
+
+| ID | Invocation / precondition | Visible result / side effects | Error / interpretation limit |
+| --- | --- | --- | --- |
+| CLI-PRIVACY-STATE | `privacy status`, `privacy off` | Stored posture or the disabled default; `off` persists `enabled=false` | Invalid or unknown posture content fails closed with a stable code; no partial acceptance. |
+| CLI-PRIVACY-ON | `privacy on PROFILE [participants] [Mbit/s] [chunk] [--force]` | Accepts and persists the posture, or returns `refused=true` with the gate and cost | Refusal is not an override of the cost model; `--force` must be explicit. Enabling while logging private flows stays impossible. |
+| CLI-PRIVACY-COST | `privacy estimate PROFILE ...` | Padding overhead, delay median/p95, cover bitrate, `fits_budget` for the given chunk and path | Numbers model cells and delay only; they do not measure the running system or promise a latency SLO. |
