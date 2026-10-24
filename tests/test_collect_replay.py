@@ -92,9 +92,14 @@ class CollectReplayTests(ConsoleFixture):
             )
         state = tm.load_peer_state(self.ctx)
         self.assertTrue(state.get("observation_gap"))
-        self.assertEqual(state["pending"], pending)
+        self.assertEqual(state["pending"][: len(pending)], pending)
+        health = state["pending"][len(pending) :]
+        self.assertEqual(len(health), 1)
+        self.assertEqual(health[0]["kind"], "ygg-health")
+        self.assertEqual(health[0]["errors"], ["fixture_unknown"])
         self.collect_at(20, True)
         self.assertTrue(tm.rows(self.ctx, "alerts.jsonl")[-1]["observation_gap"])
+        self.assertIn(health[0], tm.rows(self.ctx, "alerts.jsonl"))
 
     @logged
     def test_corrupt_queue_preserves_observation_without_rewriting_queue(self):

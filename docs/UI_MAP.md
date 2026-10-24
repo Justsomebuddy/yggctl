@@ -1,5 +1,22 @@
 # Historical report interaction contract
 
+## Health alert recovery (unreleased)
+
+With notifications on, `collect` saves a degraded observation's hourly health
+alert in `alert-state.json` before appending it to `alerts.jsonl`. A failed queue
+write remains a visible failure; a subsequent collection, including a healthy
+one, replays the original ID, timestamp and errors. Pending and queued health
+events share the existing hourly suppression rule. Notifications off defer
+existing pending events and do not stage new ones.
+
+Peer and health events share the 1000-event/1 MiB pending bounds. Invalid state,
+unreadable queue, capacity or state-write failure can prevent staging; no history
+backfill or unlimited delivery guarantee is introduced. Queue replay does not
+send directly. `alerts-forward` still requires native-recorded evidence and
+refuses an automatic resend after an ambiguous attempt. This does not establish
+remote delivery or human acknowledgement. Older collectors cannot consume health
+pending entries; drain with the new writer or preserve them before rollback.
+
 Current source: **5.11.1**. Earlier dated sections below describe historical
 behavior; the final section defines the current changed CLI contracts.
 
@@ -39,6 +56,8 @@ has been erased, or that an authenticated restore implementation now exists.
 | TELEMETRY-UNKNOWN | `collect`, unavailable node observation | Persist `peers_observed=false`, retain down/reconnect/cooldown tracking and mark an observation gap. Health remains degraded/nonzero; durable pending can still replay. |
 | ALERT-GAP | Next observed sample | Unalerted downtime confirmation restarts at that sample. An already-alerted episode is not alerted down again; recovery carries `observation_gap=true` and text does not claim uninterrupted downtime. |
 | TELEMETRY-EMPTY | Successful node observation returning no peers | `peers_observed=true`; normal observed-empty tracking/removal semantics, not an unavailable query or invented recovery. Stack-only failure does not erase a successful node observation. |
+| TELEMETRY-AMBIGUOUS | `collect`, multiple rows sharing one public peer label | Retain projected rows/counts and `peers_observed=true`; persist `ambiguous_peer_labels` in sample errors and return existing degraded/nonzero status. With notifications on, the existing hourly health diagnostic applies. Do not infer down/up/reconnect transitions for those labels; unrelated peers and pending replay continue. No private URI path is exposed. |
+| ALERT-AMBIGUITY-GAP | Duplicate label becomes unique again | Retain previous down/reconnect/cooldown state while ambiguous. Restart unalerted downtime confirmation on the first unique observation; an already-alerted label may recover once with `observation_gap=true`. This reports the now-unique label, not proof of uninterrupted availability or of which former link survived. No historical events or cursors are rewritten. |
 | CLI-RESTORE-BUDGET | `restore FILE` structural preview | 4 MiB compressed / 8 MiB TOTAL decompressed TAR / 1 MiB regular member. Metadata/padding/trailing and concatenated gzip are counted before TAR parsing. Reject over-budget/corrupt input without host writes; apply remains disabled. |
 | IPC-WORKER-PRINCIPAL | Sandboxed command launch | Historical5.7.8 shared UID only; superseded by5.8.0 below; [explicit limitations](SECURITY.md#worker-trust-principal-source-578-issue-7). |
 

@@ -42,13 +42,27 @@ these source files alone are not a complete security boundary.
 
 ## Command effects
 
-### Peer alert persistence
+### Producer alert persistence
 
 Peer transitions and their pending notification events share one atomic
 `alert-state.json` update. Pending records keep their original timestamp and
 stable ID. Later collections replay them into `alerts.jsonl`, comparing IDs
 and content to avoid re-appending an already queued event. Both the queue file
 and its parent directory are synced before pending records are retired.
+
+Hourly `ygg-health` events also enter this bounded outbox before queue writes.
+Their original errors, timestamp and ID survive a queue failure even if the next
+collection is healthy. Hourly suppression checks pending events as well as the
+queue. Old pending events drain before new events are staged, so a full outbox
+can recover when queue writes become available. Health and peer events share
+the existing capacity; neither silently evicts the other's pending records.
+Peer observation state is processed before staging new health events, including
+after an initial replay failure. A corrupt/unreadable queue still blocks health
+hour-key checking; no implicit repair or metrics-history backfill is performed.
+
+Older collectors reject health entries in `pending`. Coordinate writer upgrades;
+before rollback, drain pending with the new code or preserve the state for
+operator review. Do not delete pending records to make an older writer accept it.
 
 Legacy state without pending records is accepted. Malformed state/outbox data,
 conflicting IDs, more than 1000 pending events or a state larger than 1 MiB fail

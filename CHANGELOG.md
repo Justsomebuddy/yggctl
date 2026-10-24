@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Treat duplicate public peer labels as ambiguous observations for alert tracking.
+  Different WebSocket paths at one endpoint can share a redacted label: preserve
+  their prior tracking and pending events instead of emitting false recovery or
+  reconnect alerts. Other peers continue normally. `collect` records the fixed
+  `ambiguous_peer_labels` diagnostic and returns degraded status; private URI
+  paths remain omitted. Existing queue IDs, payloads and cursors are unchanged.
+- Persist hourly health alerts in the bounded producer outbox before queue writes.
+  A transient node/API failure followed by a queue-write error can now replay its
+  original alert after a healthy collector restart. Keep its ID, timestamp and
+  errors through queue acknowledgement failures; suppress same-hour duplicates
+  across pending and queued events. Native sender confirmation and ambiguous-send
+  handling are unchanged; local recording still does not prove remote delivery.
+
 ## [5.11.1] - 2026-10-23
 
 - Keep successful `trend [hours] json` stdout to one parseable JSON document by
