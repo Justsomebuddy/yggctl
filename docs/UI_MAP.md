@@ -1,7 +1,109 @@
 # Historical report interaction contract
 
+## Health alert recovery (unreleased)
+
+With notifications on, `collect` saves a degraded observation's hourly health
+alert in `alert-state.json` before appending it to `alerts.jsonl`. A failed queue
+write remains a visible failure; a subsequent collection, including a healthy
+one, replays the original ID, timestamp and errors. Pending and queued health
+events share the existing hourly suppression rule. Notifications off defer
+existing pending events and do not stage new ones.
+
+Peer and health events share the 1000-event/1 MiB pending bounds. Invalid state,
+unreadable queue, capacity or state-write failure can prevent staging; no history
+backfill or unlimited delivery guarantee is introduced. Queue replay does not
+send directly. `alerts-forward` still requires native-recorded evidence and
+refuses an automatic resend after an ambiguous attempt. This does not establish
+remote delivery or human acknowledgement. Older collectors cannot consume health
+pending entries; drain with the new writer or preserve them before rollback.
+
 Current source: **5.11.1**. Earlier dated sections below describe historical
 behavior; the final section defines the current changed CLI contracts.
+
+Released source: **5.11.1**. Earlier dated sections below describe historical
+behavior. The following Atlas section describes an unreleased change.
+
+## Atlas bundle publication
+
+This unreleased extension builds on the export lock/recovery change below.
+`atlas report` retains the private-store and integrity prerequisites and the
+same result keys (`json`, `md`, `dot`, `html` and observed counts). New paths are
+`atlas/atlas-<32-hex-id>/report.<extension>`. Consumers must follow returned paths;
+top-level `atlas-*.json` globs cover legacy output only. HTML remains standalone.
+
+Under the directory lock, the console validates the bounded export inventory,
+then removes only validated unpublished staging directories and legacy atomic
+temporaries. It writes all four formats inside a private `.atlas-stage-<id>`
+directory and publishes that directory with one rename. Completed files and the
+containing directory are synced before the parent-directory sync completes the
+operation. A write failure before publication cannot expose a partial new bundle.
+The CLI still returns a nonzero status and `FAIL`; no success paths or `[done]`
+are printed on that path. A later retry validates and discards staging work,
+then starts a new report; it never parses staging data as observations.
+
+Staging cleanup accepts only private current-owner directories and the fixed
+report filenames or reserved atomic temporary names, with regular private
+single-link files. Unknown, unsafe, oversized inventories or cleanup errors
+abort. Validation finishes before any cleanup. A simultaneous exporter receives
+`atlas_export_busy`, preserving the active writer's staging directory. Database
+acquisition and the collector retain their separate locks.
+
+Staging cleanup opens the validated directory without following symlinks, checks
+its device/inode identity, and unlinks only the validated basenames relative to
+that open directory. It checks the pathname identity again before removing the
+empty directory. A replaced parent or an unexpected added entry causes refusal;
+cleanup never recursively walks unvalidated content. This is not an isolation
+boundary against another process holding the same store owner's credentials.
+
+Legacy flat files, including pre-existing incomplete sets, remain untouched and
+consume their existing retention slots. Complete new bundles consume four slots;
+the budget remains 256 finished-file equivalents. Staging does not consume this
+finished-output budget. Existing retention exhaustion still requires deliberate
+operator review; this change does not delete historical evidence or auto-migrate
+it. A cleanup permission failure remains a visible error until permissions are
+restored. Temporary space is still needed for all four files.
+
+If the process exits or the parent sync fails after publication, a complete
+bundle may remain despite a missing success response. It is preserved on retry;
+exactly-once report generation is not promised. Atomic visibility is not proof
+of durability after hardware power loss. Quiesce old exporters before deployment:
+older scanners reject the new directories. Rollback must preserve or explicitly
+archive new bundles before returning to an old scanner; do not delete them
+silently. Source changes do not update installed manifests or authorize deployment.
+
+## Atlas export recovery
+
+The following describes the earlier flat-file recovery change. The bundle
+publication contract above supersedes its per-file publication behavior for new
+exports; legacy output remains readable and is not rewritten.
+
+`atlas report` retains its existing prerequisites: a valid private Atlas store,
+the integrity check and a consistent SQLite read snapshot. Successful output
+still names the four JSON/Markdown/DOT/HTML files and reports observed counts;
+world coverage remains unknown.
+
+The process holds an exclusive nonblocking directory lock from export validation
+through cleanup and all four writes. A simultaneous report fails explicitly with
+`atlas_export_busy`; retry after the active report finishes. This lock is separate
+from the Atlas database writer and collector locks, so it does not serialize
+catalogue acquisition, crawling or collection behind report generation.
+
+After a crashed export, the next report validates the entire bounded directory
+before deleting abandoned atomic-write files. Only reserved `.yggctl-` names
+with eight lowercase letters/digits/underscores, regular-file type, current
+effective UID, mode `0600` and one hard link qualify. Unknown entries, unsafe
+temporary files, directory limits and retention limits still fail closed; an
+unsafe temporary gives `atlas_unsafe_temporary_file`. Cleanup errors abort the
+report. Temporary data is discarded, never imported as observations or promoted
+to a finished report. Completed reports and the SQLite database are preserved.
+
+All cooperating exporters must use this lock. Quiesce old report processes
+before adopting the change; it cannot protect a concurrent older or external
+writer that ignores the lock. This source change does not update an installed
+integrity manifest or authorize deployment. Four files are still published
+individually: an interrupted report can leave an incomplete completed-file set,
+and a retry creates a new report rather than completing that set. Retention
+remains an explicit operator review, not automatic deletion of finished reports.
 
 ## 2026-10-20 — source 5.7.5
 
@@ -39,6 +141,8 @@ has been erased, or that an authenticated restore implementation now exists.
 | TELEMETRY-UNKNOWN | `collect`, unavailable node observation | Persist `peers_observed=false`, retain down/reconnect/cooldown tracking and mark an observation gap. Health remains degraded/nonzero; durable pending can still replay. |
 | ALERT-GAP | Next observed sample | Unalerted downtime confirmation restarts at that sample. An already-alerted episode is not alerted down again; recovery carries `observation_gap=true` and text does not claim uninterrupted downtime. |
 | TELEMETRY-EMPTY | Successful node observation returning no peers | `peers_observed=true`; normal observed-empty tracking/removal semantics, not an unavailable query or invented recovery. Stack-only failure does not erase a successful node observation. |
+| TELEMETRY-AMBIGUOUS | `collect`, multiple rows sharing one public peer label | Retain projected rows/counts and `peers_observed=true`; persist `ambiguous_peer_labels` in sample errors and return existing degraded/nonzero status. With notifications on, the existing hourly health diagnostic applies. Do not infer down/up/reconnect transitions for those labels; unrelated peers and pending replay continue. No private URI path is exposed. |
+| ALERT-AMBIGUITY-GAP | Duplicate label becomes unique again | Retain previous down/reconnect/cooldown state while ambiguous. Restart unalerted downtime confirmation on the first unique observation; an already-alerted label may recover once with `observation_gap=true`. This reports the now-unique label, not proof of uninterrupted availability or of which former link survived. No historical events or cursors are rewritten. |
 | CLI-RESTORE-BUDGET | `restore FILE` structural preview | 4 MiB compressed / 8 MiB TOTAL decompressed TAR / 1 MiB regular member. Metadata/padding/trailing and concatenated gzip are counted before TAR parsing. Reject over-budget/corrupt input without host writes; apply remains disabled. |
 | IPC-WORKER-PRINCIPAL | Sandboxed command launch | Historical5.7.8 shared UID only; superseded by5.8.0 below; [explicit limitations](SECURITY.md#worker-trust-principal-source-578-issue-7). |
 
@@ -142,3 +246,11 @@ installed-runtime or upstream measurement claims. See [release scope](RELEASE-5.
 | CLI-EVENTS-LIMIT | More than 1000 matching records | Return newest 1000 in journal-provided order (no independent realtime sorting); `truncated=true` plus `WARN events_truncated` on stderr | Query at most 1001 records as a bounded overflow probe; omitted count is unknown. Narrow the time window or use a reviewed external journal query for omitted history. Successful bounded inspection remains rc0, not a completeness guarantee. |
 | CLI-EVENTS-OUTPUT | Empty, partial or exactly full window | Preserve `logs`; add `window_hours`, `limit=1000`, `returned`, `truncated` | Exactly 1000 returns `truncated=false`; metadata describes records returned by journalctl under current access/retention, not proof of a complete historical journal. Existing human completion line remains on stdout. |
 | CLI-EVENTS-FAILURE | Invalid hours, journal command/byte/time failure, malformed journal JSON | Existing nonzero failure; no partial log projection presented as successful | Existing message redaction applies before output, including the overflow record. No extra privileges, unbounded reads or relaxation of byte/time caps. |
+
+## Privileged state admission (5.12.0, 2026-10-24)
+
+Root lock-taking operations and the config/key health gate reject unsafe existing
+state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
+`state_acl_unavailable`. Missing parent state is an error, not auto-provisioning.
+No implicit permission repair or queue reset occurs. Read-only historical output
+remains unverified; see [the exact custody scope](STATE_CUSTODY.md).

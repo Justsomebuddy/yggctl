@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.11.1"
+VERSION = "5.12.0"
 # The reader accepts the writer's full pre-compaction retention window.
 METRIC_RETENTION = 10000
 METRIC_RECORD_LIMIT = METRIC_RETENTION * 6 // 5
@@ -393,6 +393,10 @@ class Context:
                 self.lock_depth -= 1
                 event("exit", "locked", "nested")
             return
+        if self.require_root:
+            import checks
+
+            checks.state_custody(self)
         self.p.state.mkdir(mode=0o755, parents=True, exist_ok=True)
         path = self.p.state / ".console.lock"
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -411,6 +415,8 @@ class Context:
                     if time.monotonic() >= deadline:
                         raise Failure("mutation_lock_timeout")
                     time.sleep(0.1)
+            if self.require_root:
+                checks.state_custody(self)
             self.lock_depth = 1
             event("state", "mutation_lock", "acquired")
             yield

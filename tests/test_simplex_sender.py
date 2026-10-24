@@ -443,6 +443,22 @@ class NativeSender(unittest.TestCase):
             self.call()
 
     @logged
+    def test_successful_kernel_lock_wait_branch_without_scheduler_race(self):
+        with (
+            patch.object(sender.fcntl, "flock", side_effect=BlockingIOError()),
+            patch.object(
+                sender.Context, "run", return_value=subprocess.CompletedProcess([], 0, b"", b"")
+            ) as wait,
+        ):
+            with sender.profile_lock(self.cfg["lock"], time.monotonic() + 1) as fd:
+                self.assertTrue(stat.S_ISREG(os.fstat(fd).st_mode))
+                argv = wait.call_args.args[0]
+                self.assertEqual(argv[:3], ["/usr/bin/flock", "--exclusive", "--timeout"])
+                self.assertEqual(argv[-1], str(fd))
+                self.assertEqual(wait.call_args.kwargs["pass_fds"], (fd,))
+                self.assertFalse(wait.call_args.kwargs["check"])
+
+    @logged
     def test_budget_before_intent_preserves_safe_retry_and_root_group_lock_mode(self):
         with (
             patch.object(sender, "lookup", return_value=("a" * 64, 2, None)),
