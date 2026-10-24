@@ -350,3 +350,11 @@ existing journal is retained. Restore the intended policy/runtime evidence and
 retry recovery; do not delete the journal to bypass proof. No automatic network
 repair, new journal format or installation change is introduced. The changed
 checks.py hash needs review in the external deployment integrity manifest.
+
+## Stored-history throughput (unreleased, 2026-10-24)
+
+| ID | Invocation / precondition | Visible result / side effects | Error / interpretation limit |
+| --- | --- | --- | --- |
+| CLI-THROUGHPUT-SOURCE | Bounded in-window `metrics.jsonl` samples | Per-label mean/peak send and receive rates from adjacent counter deltas | Counters are writer-owned local observations; a role-writable history is not authenticated evidence and does not prove delivered or useful traffic. |
+| CLI-THROUGHPUT-PATH | Duplicate timestamps, counter reset, sampling gap, or unusable counters | Duplicate/zero intervals skipped silently; resets and gaps counted and shown per label; unusable counters counted in the header | No clamping, interpolation or gap extrapolation. A reset is not a zero rate and a gap is not a slow link. |
+| CLI-THROUGHPUT-SCOPE | Any invocation | Text only; exit status unchanged from other read-only metric views | Not a throughput test, not a capacity estimate, not a probe of peer reachability or path quality. Compare with a deliberate end-to-end transfer before drawing conclusions. |

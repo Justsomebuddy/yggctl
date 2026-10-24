@@ -1461,3 +1461,106 @@ def watch(ctx, count=5, interval=2):
     print(f"processed={count} errors={errors} elapsed={time.monotonic() - start:.1f}s")
     if errors:
         raise Failure(f"watch_samples_failed:count={errors}")
+
+
+# Stored-history throughput: observed counter deltas, never link capacity.
+# A gap larger than this is not a rate: the collector cadence is minutes, so a
+# quarter-hour hole would otherwise report a meaningless long-window average.
+THROUGHPUT_MAX_GAP = 600.0
+
+
+@logged
+def throughput_track(points):
+    """Adjacent-sample byte deltas for one displayed peer label.
+
+    Counters are monotonic in the collector, so a decrease is a reset and the
+    interval is skipped, never clamped. Only positive intervals no larger than
+    THROUGHPUT_MAX_GAP contribute; nothing is extrapolated.
+    """
+    intervals = gaps = resets = 0
+    seconds = sent = recv = 0.0
+    peak_out = peak_in = 0.0
+    previous = None
+    for at, rx, tx in points:
+        if previous is None:
+            previous = (at, rx, tx)
+            continue
+        previous_at, previous_rx, previous_tx = previous
+        previous = (at, rx, tx)
+        elapsed = (at - previous_at).total_seconds()
+        if elapsed <= 0:
+            continue
+        delta_out = tx - previous_tx
+        delta_in = rx - previous_rx
+        if delta_out < 0 or delta_in < 0:
+            resets += 1
+            continue
+        if elapsed > THROUGHPUT_MAX_GAP:
+            gaps += 1
+            continue
+        intervals += 1
+        seconds += elapsed
+        sent += delta_out
+        recv += delta_in
+        peak_out = max(peak_out, delta_out * 8 / elapsed / 1e6)
+        peak_in = max(peak_in, delta_in * 8 / elapsed / 1e6)
+    return {
+        "intervals": intervals,
+        "gaps": gaps,
+        "resets": resets,
+        "seconds": seconds,
+        "bytes_out": sent,
+        "bytes_in": recv,
+        "peak_out": peak_out,
+        "peak_in": peak_in,
+    }
+
+
+@logged
+def throughput(ctx, hours=24):
+    """Per-peer observed send/receive rates from stored samples.
+
+    This is a bounded, read-only projection of peer counter deltas. It is not
+    link capacity, not application goodput and not a probe of remote peers.
+    Rows without finite nonnegative counters are skipped, not zero-filled.
+    """
+    values, invalid = window(ctx, hours)
+    audit = {"checked": 0, "invalid": 0}
+    tracks: dict[str, list[Any]] = {}
+    for at, row in values:
+        peer_rows = row.get("peers")
+        if not isinstance(peer_rows, list):
+            continue
+        for peer in peer_rows:
+            if not isinstance(peer, dict):
+                continue
+            rx = trend_number(peer.get("rx"), audit)
+            tx = trend_number(peer.get("tx"), audit)
+            if rx is None or tx is None:
+                continue
+            tracks.setdefault(peer_label(peer.get("r")), []).append((at, rx, tx))
+    event(
+        "state",
+        "throughput_numeric_validation",
+        f"checked={audit['checked']} invalid={audit['invalid']}",
+    )
+    print(
+        f"window={hours}h samples={len(values)} invalid_records={invalid} "
+        f"peers={len(tracks)} invalid_counters={audit['invalid']}; "
+        f"observed counter deltas are NOT link capacity"
+    )
+    if not tracks:
+        print("no_peer_counters: stored samples carry no usable peer counters")
+        return
+    for label in sorted(tracks):
+        stats = throughput_track(tracks[label])
+        if not stats["intervals"]:
+            print(f"{label}: no_usable_intervals gaps={stats['gaps']} resets={stats['resets']}")
+            continue
+        average_out = stats["bytes_out"] * 8 / stats["seconds"] / 1e6
+        average_in = stats["bytes_in"] * 8 / stats["seconds"] / 1e6
+        print(
+            f"{label}: sent={average_out:.2f}Mbit/s peak={stats['peak_out']:.2f} "
+            f"recv={average_in:.2f}Mbit/s peak={stats['peak_in']:.2f} "
+            f"intervals={stats['intervals']} gaps={stats['gaps']} resets={stats['resets']}"
+        )

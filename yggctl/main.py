@@ -43,7 +43,8 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
 Здоровье:     check (15 проверок), status, selftest [offline], guard, verify-hashes, socks, socks-test
 Просмотр:     peers, stack-peers, self, tree, paths, sessions, config [show|validate], mode [show],
               version, update-check, logs [N], events [часы], firewall-status
-Метрики:      collect, stats [часы], graph [часы], trend [часы] [json], watch/top [N] [секунды],
+Метрики:      collect, stats [часы], graph [часы], trend [часы] [json], throughput [часы],
+              watch/top [N] [секунды],
               report, peers-score,
               notify on|off|show|test, alerts-forward
 Управление:   start, stop, restart, enable, disable (с приставкой stack- — для стека),
@@ -63,8 +64,8 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
               discover. Для своей ноды — self, peers, tree.
 Закрыто:      nameserver и timer — только show; purge, rotate-key, chaos, upgrade, baseline-update
               отключены до отдельного ревью. Установка — scripts/deployment/deploy.sh.
-Без sudo:     help, version, update-check, stats, graph, trend.
-Самотест:     selftest и selftest offline требуют sudo; stats/graph/trend — читаемый файл метрик.
+Без sudo:     help, version, update-check, stats, graph, trend, throughput.
+Самотест:     selftest и selftest offline требуют sudo; stats/graph/trend/throughput — читаемый файл метрик.
 Песочница:    research, atlas и команды сети Yggdrasil работают от отдельных пользователей ролей без
               root и без ключей; у research нет сети, у сетевых команд — только localhost.
 Тревоги:      пир недоступен 10+ минут, нестабилен (3+ разрыва за час) или вернулся, сбой ноды —
@@ -295,6 +296,14 @@ API_VIEWS = {
     "paths": "getPaths",
     "sessions": "getSessions",
 }
+
+
+@logged
+def do_throughput(ctx, args, a):
+    # Read-only and lock-free like stats: sudo only when this user cannot read the file.
+    if os.geteuid() != 0 and not os.access(ctx.p.state / "metrics.jsonl", os.R_OK):
+        ctx.root()
+    telemetry.throughput(ctx, bounded_number(a[0], 1, 72) if a else 24)
 
 
 @logged
@@ -649,6 +658,7 @@ COMMANDS = {
     "stats": Command(do_stats, most=1, root=False),
     "graph": Command(do_stats, most=1, root=False),
     "trend": Command(do_trend, most=2, root=False),
+    "throughput": Command(do_throughput, most=1, root=False),
     **{name: Command(do_view) for name in API_VIEWS},
     "check": Command(do_check),
     "status": Command(do_check),

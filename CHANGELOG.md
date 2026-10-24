@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Add read-only `throughput [hours]` (default 24, integer 1..72) over the stored
+  metrics window: per sanitized peer label it reports mean and peak observed
+  send/receive rates from adjacent `rx`/`tx` counter deltas, plus counted
+  intervals, gaps and resets.
+
 ## [5.12.2] - 2026-10-25
 
 - Do not compare stored-history trends for a sanitized peer label that covers
