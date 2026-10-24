@@ -50,7 +50,7 @@ class AtlasExportRecovery(ObservedFixture):
                     os._exit(25)
                 os._exit(24)
             self.assertEqual(os.waitpid(child, 0)[1], 23 << 8)
-            temporary = list(self.root.glob(".yggctl-*"))
+            temporary = list(self.root.glob(".atlas-stage-*/.yggctl-*"))
             self.assertEqual(len(temporary), 1)
             self.assertEqual(stat.S_IMODE(temporary[0].lstat().st_mode), 0o600)
             self.assertEqual(
@@ -99,7 +99,7 @@ class AtlasExportRecovery(ObservedFixture):
             ready, _, _ = select.select([entered_r], [], [], 10)
             self.assertTrue(ready, "first report did not reach the export barrier")
             self.assertEqual(os.read(entered_r, 1), b"1")
-            live = list(self.root.glob(".yggctl-*"))
+            live = list(self.root.glob(".atlas-stage-*/.yggctl-*"))
             self.assertEqual(len(live), 1)
             live_info, live_bytes = live[0].lstat(), live[0].read_bytes()
             with Store(self.ctx, True) as writer:
@@ -118,9 +118,9 @@ class AtlasExportRecovery(ObservedFixture):
         self.assertEqual(status, 0)
         if live:
             self.assertFalse(live[0].exists())
-        self.assertEqual(len(list(self.root.glob("atlas-*.json"))), 1)
+        self.assertEqual(len(list(self.root.glob("atlas-*"))), 1)
         self.report()
-        self.assertEqual(len(list(self.root.glob("atlas-*.json"))), 2)
+        self.assertEqual(len(list(self.root.glob("atlas-*"))), 2)
         with Store(self.ctx) as reader:
             self.assertEqual(reader.meta("during_export"), "progressed")
 

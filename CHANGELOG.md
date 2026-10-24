@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Publish new Atlas JSON/Markdown/DOT/HTML reports as one complete private
+  directory. Prepare all formats in a reserved staging directory before an
+  atomic directory rename; failed writes do not publish partial generations.
+  The next locked report validates and discards only unpublished staging work.
+  Preserve legacy flat reports and completed bundles, including their retention
+  limit. Returned file paths now point into `atlas-<id>/report.<format>`; consumers
+  must use those paths instead of assuming a flat directory layout.
+  See the [bundle publication contract](docs/UI_MAP.md#atlas-bundle-publication).
+
 - Recover interrupted Atlas exports on the next `atlas report`: validate the
   bounded export directory before removing only private, single-link temporary
   files matching the console's reserved atomic-write pattern. Preserve completed

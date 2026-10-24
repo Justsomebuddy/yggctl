@@ -392,7 +392,7 @@ def export_locked(root):
 
 @logged
 def scan_exports(root):
-    count, abandoned = 0, []
+    count, abandoned, stages = 0, [], []
     # Complete validation precedes every unlink, including retention failures.
     for i, path in enumerate(root.iterdir()):
         if i >= 512:
@@ -410,6 +410,14 @@ def scan_exports(root):
                 raise Failure("atlas_unsafe_temporary_file")
             abandoned.append(path)
             continue
+        if re.fullmatch(r"\.atlas-stage-[0-9a-f]{32}", path.name):
+            children, identity = _validate_export_dir(path, complete=False)
+            stages.append((path, children, identity))
+            continue
+        if re.fullmatch(r"atlas-[0-9a-f]{32}", path.name):
+            _validate_export_dir(path, complete=True)
+            count += 4
+            continue
         if (
             not re.fullmatch(r"atlas-[0-9a-f]{32}\.(json|md|dot|html)", path.name)
             or path.is_symlink()
@@ -419,9 +427,111 @@ def scan_exports(root):
         count += 1
     if count + 4 > 256:
         raise Failure("atlas_export_retention_review_required")
+    for stage, children, identity in stages:
+        fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != identity:
+                raise Failure("atlas_unsafe_export_directory")
+            info = stage.lstat()
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != identity:
+                raise Failure("atlas_unsafe_export_directory")
+            for child in children:
+                os.unlink(child.name, dir_fd=fd)
+                event("state", "atlas_export", "abandoned_stage_file_removed")
+            info = stage.lstat()
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != identity:
+                raise Failure("atlas_unsafe_export_directory")
+            stage.rmdir()
+        finally:
+            os.close(fd)
+        event("state", "atlas_export", "abandoned_stage_removed")
     for path in abandoned:
         path.unlink()
         event("state", "atlas_export", "abandoned_atomic_removed")
+
+
+@logged
+def _validate_export_dir(path, *, complete):
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise Failure("atlas_unsafe_export_directory")
+    identity = (info.st_dev, info.st_ino)
+    expected = {"report.json", "report.md", "report.dot", "report.html"}
+    entries = set()
+    children = []
+    temporary_count = 0
+    for i, child in enumerate(path.iterdir()):
+        if i >= (4 if complete else 5):
+            raise Failure("atlas_unsafe_export_contents")
+        temporary = bool(re.fullmatch(r"\.yggctl-[a-z0-9_]{8}", child.name))
+        if child.name not in expected and not (not complete and temporary):
+            raise Failure("atlas_unsafe_export_contents")
+        if temporary:
+            temporary_count += 1
+            if temporary_count > 1:
+                raise Failure("atlas_unsafe_export_contents")
+        info = child.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise Failure("atlas_unsafe_export_contents")
+        entries.add(child.name)
+        children.append(child)
+    if complete and entries != expected:
+        raise Failure("atlas_unsafe_export_contents")
+    return children, identity
+
+
+@logged
+def _publish_export(root, name, values):
+    stage = root / (".atlas-stage-" + name.removeprefix("atlas-"))
+    destination = root / name
+    if destination.exists() or destination.is_symlink():
+        raise Failure("atlas_export_collision")
+    event("external_start", "atlas_export_stage_mkdir")
+    try:
+        stage.mkdir(mode=0o700)
+        stage.chmod(0o700)
+    except OSError as exc:
+        event("external_error", "atlas_export_stage_mkdir", type(exc).__name__)
+        raise
+    event("external_exit", "atlas_export_stage_mkdir", "success")
+    files = {}
+    for extension, value in values:
+        path = stage / ("report." + extension)
+        atomic(path, value)
+        files[extension] = str(destination / path.name)
+    # A failed write leaves only a disposable staging directory for the next
+    # locked report. A failed root fsync may leave a complete published bundle.
+    if destination.exists() or destination.is_symlink():
+        raise Failure("atlas_export_collision")
+    event("external_start", "atlas_export_stage_rename")
+    try:
+        stage.rename(destination)
+    except OSError as exc:
+        event("external_error", "atlas_export_stage_rename", type(exc).__name__)
+        raise
+    event("external_exit", "atlas_export_stage_rename", "success")
+    event("external_start", "atlas_export_root_fsync")
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        event("external_error", "atlas_export_root_fsync", type(exc).__name__)
+        raise
+    event("external_exit", "atlas_export_root_fsync", "success")
+    return files
 
 
 @logged
@@ -452,16 +562,16 @@ def _report_locked(ctx, store):
     payload = json.dumps(data, sort_keys=True, allow_nan=False)
     if len(payload.encode()) > 64 * 1024 * 1024:
         raise Failure("atlas_export_guard_report_not_saved")
-    files = {}
-    for extension, value in (
-        ("json", payload + "\n"),
-        ("md", markdown(data)),
-        ("dot", dot(data)),
-        ("html", html(data)),
-    ):
-        path = store.root / (name + "." + extension)
-        atomic(path, value)
-        files[extension] = str(path)
+    files = _publish_export(
+        store.root,
+        name,
+        (
+            ("json", payload + "\n"),
+            ("md", markdown(data)),
+            ("dot", dot(data)),
+            ("html", html(data)),
+        ),
+    )
     elapsed = time.monotonic() - start
     print(
         f"[3/3] processed=4/4 remaining=0 errors=0 elapsed={elapsed:.2f}s speed={4 / max(elapsed, 0.001):.2f}files/s",

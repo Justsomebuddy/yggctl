@@ -3,7 +3,59 @@
 Released source: **5.11.1**. Earlier dated sections below describe historical
 behavior. The following Atlas section describes an unreleased change.
 
+## Atlas bundle publication
+
+This unreleased extension builds on the export lock/recovery change below.
+`atlas report` retains the private-store and integrity prerequisites and the
+same result keys (`json`, `md`, `dot`, `html` and observed counts). New paths are
+`atlas/atlas-<32-hex-id>/report.<extension>`. Consumers must follow returned paths;
+top-level `atlas-*.json` globs cover legacy output only. HTML remains standalone.
+
+Under the directory lock, the console validates the bounded export inventory,
+then removes only validated unpublished staging directories and legacy atomic
+temporaries. It writes all four formats inside a private `.atlas-stage-<id>`
+directory and publishes that directory with one rename. Completed files and the
+containing directory are synced before the parent-directory sync completes the
+operation. A write failure before publication cannot expose a partial new bundle.
+The CLI still returns a nonzero status and `FAIL`; no success paths or `[done]`
+are printed on that path. A later retry validates and discards staging work,
+then starts a new report; it never parses staging data as observations.
+
+Staging cleanup accepts only private current-owner directories and the fixed
+report filenames or reserved atomic temporary names, with regular private
+single-link files. Unknown, unsafe, oversized inventories or cleanup errors
+abort. Validation finishes before any cleanup. A simultaneous exporter receives
+`atlas_export_busy`, preserving the active writer's staging directory. Database
+acquisition and the collector retain their separate locks.
+
+Staging cleanup opens the validated directory without following symlinks, checks
+its device/inode identity, and unlinks only the validated basenames relative to
+that open directory. It checks the pathname identity again before removing the
+empty directory. A replaced parent or an unexpected added entry causes refusal;
+cleanup never recursively walks unvalidated content. This is not an isolation
+boundary against another process holding the same store owner's credentials.
+
+Legacy flat files, including pre-existing incomplete sets, remain untouched and
+consume their existing retention slots. Complete new bundles consume four slots;
+the budget remains 256 finished-file equivalents. Staging does not consume this
+finished-output budget. Existing retention exhaustion still requires deliberate
+operator review; this change does not delete historical evidence or auto-migrate
+it. A cleanup permission failure remains a visible error until permissions are
+restored. Temporary space is still needed for all four files.
+
+If the process exits or the parent sync fails after publication, a complete
+bundle may remain despite a missing success response. It is preserved on retry;
+exactly-once report generation is not promised. Atomic visibility is not proof
+of durability after hardware power loss. Quiesce old exporters before deployment:
+older scanners reject the new directories. Rollback must preserve or explicitly
+archive new bundles before returning to an old scanner; do not delete them
+silently. Source changes do not update installed manifests or authorize deployment.
+
 ## Atlas export recovery
+
+The following describes the earlier flat-file recovery change. The bundle
+publication contract above supersedes its per-file publication behavior for new
+exports; legacy output remains readable and is not rewritten.
 
 `atlas report` retains its existing prerequisites: a valid private Atlas store,
 the integrity check and a consistent SQLite read snapshot. Successful output
