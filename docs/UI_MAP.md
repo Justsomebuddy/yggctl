@@ -254,3 +254,28 @@ state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
 `state_acl_unavailable`. Missing parent state is an error, not auto-provisioning.
 No implicit permission repair or queue reset occurs. Read-only historical output
 remains unverified; see [the exact custody scope](STATE_CUSTODY.md).
+
+## Pending admission warning (unreleased)
+
+Invocations: `collect`, `notify show`, `alerts-forward`. Existing privilege and
+locking preconditions apply. After a pending-capacity refusal has been recorded,
+these commands print:
+
+```text
+WARNING alert_admission_incomplete=yes; notification_history_may_be_incomplete=yes
+```
+
+The warning persists after queue recovery and on later successful invocations,
+including an empty forwarding backlog or first-run cursor initialisation.
+`collect` still writes its normal current-sample result; `alerts-forward` still
+reports `remaining` and `evicted_uncheckpointed_total`. Historical warning alone
+does not change exit status or send a message. Automation must inspect the warning
+as well as monitor nonzero collector/forwarder exits.
+
+Capacity refusals atomically add the boolean to existing `alert-state.json`;
+old pending events are preserved and no new queue entry is created. No automatic
+acknowledgement/reset is introduced. A malformed state/flag or unavailable write
+remains an error. Missing alerts are not fabricated from history; this output
+signals possible incomplete notification history, not an exact loss count or
+proof of delivery. Concurrent old writers can discard the new field: upgrade
+writers together and retain state before rollback.

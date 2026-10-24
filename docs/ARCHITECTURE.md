@@ -166,3 +166,41 @@ deployment projection. Deployment-only legacy `alert_tests.py`, installation,
 manifests, units and configuration remain separate. This reference repository
 does not install, migrate or restart either layout. See the
 [5.10.0 qualification record](RELEASE-5.10.0.md) for the final source and evidence.
+
+### Pending admission visibility (unreleased)
+
+When a new peer batch or hourly health intent cannot fit the pending-event
+count limit, save `admission_incomplete: true` in `alert-state.json` before
+raising the existing capacity failure. This one boolean consumes no queue slot,
+contains no event payload, and leaves the existing pending IDs, contents and
+tracking unchanged. Repeated refusals do not create a counter or grow the file.
+
+The flag survives replay, observed/unknown/ambiguous peer transitions, notification
+pauses and restarts. It is deliberately sticky: processing all remaining alerts
+cannot prove that earlier refused events were later reconstructed. There is no
+automatic reset or acknowledgement command in this change. Preserve the state
+for investigation; do not delete it to silence the warning. Old writers may drop
+an unknown state field, so coordinate writer upgrades and preserve state before
+rollback. State without the field remains accepted; a present non-boolean value
+fails validation.
+
+`collect`, `notify show` and `alerts-forward` display the historical warning.
+Successful current work retains its exit status. Alert delivery and native-attempt
+semantics are unchanged; the warning is local operator output, not a SimpleX
+message. The independent queue-retention counter still describes evicted records,
+not admission refusals. A zero backlog/counter is not proof of complete history.
+
+This flag covers refusals at the pending count limit. If state itself cannot be
+written (permissions, I/O or the existing size limit), durable recording cannot be
+promised and the collection remains an error. External monitoring of collector
+failures is still required. It is not a universal storage-failure ledger.
+
+The existing state-custody checks remain in force. Incorrect file permissions
+can refuse collection before an admission marker can be written. Correct custody
+does not imply writable storage: for example, a separately mounted queue volume
+can be full while the state and metrics volumes remain writable. An offline
+fixture with real `ENOSPC` on that queue, production root custody enabled and the
+unchanged 1000-event pending limit reproduces a transient health intent refused
+before recovery. API observations, time and sender are controlled fixtures;
+this is not qualification of a particular installation or a full single-volume
+disk failure. The persistent warning does not reconstruct that missing intent.
