@@ -160,7 +160,7 @@ class HealthOutboxTests(ConsoleFixture):
         self.assertEqual(self.pending(), [])
 
     @logged
-    def test_full_pending_and_invalid_health_do_not_mutate_state(self):
+    def test_full_pending_marks_admission_without_changing_events(self):
         peer = {"id": "peer", "ts": "t", "kind": "ygg-peer-down", "peer": URI}
         tm.save_peer_state(
             self.ctx, {"pending": [dict(peer, id=str(n)) for n in range(tm.PEER_PENDING_LIMIT)]}
@@ -168,7 +168,9 @@ class HealthOutboxTests(ConsoleFixture):
         before = (self.paths.state / "alert-state.json").read_bytes()
         with self.assertRaisesRegex(Failure, "alert_pending_limit"):
             tm.stage_health_alert(self.ctx, {"ts": "t", "errors": ["source_unavailable"]})
-        self.assertEqual((self.paths.state / "alert-state.json").read_bytes(), before)
+        after = tm.load_peer_state(self.ctx)
+        self.assertIs(after.pop("admission_incomplete"), True)
+        self.assertEqual(after, json.loads(before))
         good = {
             "id": "x",
             "ts": "t",
