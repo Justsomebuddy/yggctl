@@ -254,3 +254,30 @@ state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
 `state_acl_unavailable`. Missing parent state is an error, not auto-provisioning.
 No implicit permission repair or queue reset occurs. Read-only historical output
 remains unverified; see [the exact custody scope](STATE_CUSTODY.md).
+
+## Configured TCP peer evidence
+
+`check`, mode status and an unchanged `mode direct|tunnel` request now refuse
+contradictory established TCP connections to configured TCP/TLS/WS/WSS peers.
+Each such socket must have original-direction ESTABLISHED conntrack evidence;
+reply-only tuples and stale TIME_WAIT records cannot supply that evidence.
+`underlay_peer_socket_proof_missing` means a record or explicit mark is absent;
+`underlay_peer_mark_mismatch` means at least one matching record contradicts the
+mode. Direct expects3905; tunnel preserves mark !=3905. A valid sibling flow
+cannot override either failure. The success result/output shape is unchanged.
+
+Scope is configured peer destinations owned by the two service PIDs. Local SOCKS
+clients, listening sockets, unrelated destinations and other processes are not
+expanded into a new all-traffic policy. The pre-existing minimum of runtime
+proof for each PID remains. This additional check does not claim complete route,
+VPN leak, crypto or network-history validation. Kernel/API observations are not
+an atomic snapshot; transient absence may require a retry after convergence.
+
+For example, changing a rule that marks new connections leaves old conntrack
+marks intact. A peer reconnect can then create a contradictory new connection.
+The unchanged-mode command now fails instead of printing runtime proof verified.
+If this happens during compensation or `recover-transaction --apply`, the
+existing journal is retained. Restore the intended policy/runtime evidence and
+retry recovery; do not delete the journal to bypass proof. No automatic network
+repair, new journal format or installation change is introduced. The changed
+checks.py hash needs review in the external deployment integrity manifest.

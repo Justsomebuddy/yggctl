@@ -277,3 +277,13 @@ Publication does not modify installed files, services, policy or alert profiles.
 
 The current source version is 5.11.0; this source repository does not change installed files or running nodes.
 No stable release, generic installer or live deployment is claimed.
+
+## Unreleased: contradictory TCP peer evidence
+
+- Refuse runtime proof when an established socket to a configured TCP/TLS/WS/WSS
+  peer lacks original-direction conntrack evidence or has a mark contradicting
+  the current mode. A good sibling connection no longer hides the contradiction.
+- Retain the transaction journal after failed compensation/recovery proof; a
+  successful retry after evidence is repaired archives it through the existing
+  recovery path. No schema, route, firewall, delivery or deployment changes.
+  See [TCP proof operator behavior](docs/UI_MAP.md#configured-tcp-peer-evidence).
