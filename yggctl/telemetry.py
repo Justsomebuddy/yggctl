@@ -288,6 +288,7 @@ UNSTABLE_REPEAT_HOURS = 6  # at most one "unstable" alert per peer in this time
 PEER_STATE_LIMIT = 1 << 20
 PEER_PENDING_LIMIT = 1000  # no larger than the queue's ordinary-alert retention capacity
 PEER_ALERT_KINDS = ("ygg-peer-down", "ygg-peer-up", "ygg-peer-unstable")
+HEALTH_ALERT_KIND = "ygg-health"
 
 
 @logged
@@ -305,13 +306,22 @@ def load_peer_state(ctx):
         raise Failure("alert_pending_invalid")
     seen = set()
     for item in pending:
-        if (
-            not isinstance(item, dict)
-            or item.get("kind") not in PEER_ALERT_KINDS
-            or not isinstance(item.get("ts"), str)
-            or not isinstance(item.get("peer"), str)
-            or "id" not in item
-        ):
+        if not isinstance(item, dict) or not isinstance(item.get("ts"), str) or "id" not in item:
+            raise Failure("alert_pending_invalid")
+        if item.get("kind") == HEALTH_ALERT_KIND:
+            if (
+                set(item) != {"ts", "id", "kind", "key", "errors"}
+                or not isinstance(item.get("key"), str)
+                or len(item["key"]) != len("collect:2026010100")
+                or not item["key"].startswith("collect:")
+                or not item["key"][8:].isascii()
+                or not item["key"][8:].isdigit()
+                or not isinstance(item.get("errors"), list)
+                or not item["errors"]
+                or any(not isinstance(error, str) for error in item["errors"])
+            ):
+                raise Failure("alert_pending_invalid")
+        elif item.get("kind") not in PEER_ALERT_KINDS or not isinstance(item.get("peer"), str):
             raise Failure("alert_pending_invalid")
         aid = alert_id(item)
         if aid in seen:
@@ -364,7 +374,7 @@ def flush_peer_alerts(ctx):
         for item in pending:
             # Do not copy a legacy private credential into the group-readable
             # queue, or mutate its stable-ID payload implicitly during replay.
-            if item["peer"] != peer_label(item["peer"]):
+            if item["kind"] in PEER_ALERT_KINDS and item["peer"] != peer_label(item["peer"]):
                 raise Failure("legacy_peer_pending_requires_privacy_review")
             aid = item["id"]
             if aid in queued:
@@ -392,6 +402,33 @@ def flush_peer_alerts(ctx):
 def peer_alerts(ctx, sample, uptimes=None):
     with ctx.locked():
         return stage_peer_alerts(ctx, sample, uptimes)
+
+
+@logged
+def stage_health_alert(ctx, sample):
+    """Save one original degraded observation per hour before queue I/O."""
+    if not sample["errors"]:
+        return
+    key = "collect:" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H")
+    state = load_peer_state(ctx)
+    pending = state.get("pending", [])
+    if any(item.get("kind") == HEALTH_ALERT_KIND and item["key"] == key for item in pending):
+        return
+    if any(item.get("key") == key for item in rows(ctx, "alerts.jsonl")):
+        return
+    if len(pending) >= PEER_PENDING_LIMIT:
+        raise Failure("alert_pending_limit")
+    state["pending"] = pending + [
+        {
+            "ts": sample["ts"],
+            "id": secrets.token_hex(8),
+            "kind": HEALTH_ALERT_KIND,
+            "key": key,
+            "errors": sample["errors"],
+        }
+    ]
+    save_peer_state(ctx, state)
+    event("state", "health_outbox", "staged")
 
 
 @logged
@@ -752,26 +789,15 @@ def collect(ctx):
                 # validation/capacity checks. Do not retry or acknowledge the
                 # failed queue here; surface its original error after staging.
                 peer_alerts(ctx, sample, uptimes)
+                try:
+                    stage_health_alert(ctx, sample)
+                except (Failure, OSError) as exc:
+                    event("error", "health_outbox", type(exc).__name__)
                 raise
         peer_alerts(ctx, sample, uptimes)
         if enabled:
+            stage_health_alert(ctx, sample)
             flush_peer_alerts(ctx)
-            if sample["errors"]:
-                key = "collect:" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H")
-                if not any(a.get("key") == key for a in rows(ctx, "alerts.jsonl")):
-                    append(
-                        ctx,
-                        "alerts.jsonl",
-                        {
-                            "ts": sample["ts"],
-                            "id": secrets.token_hex(8),
-                            "kind": "ygg-health",
-                            "key": key,
-                            "errors": sample["errors"],
-                        },
-                        1000,
-                    )
-                    event("alert", "collect", "health_degraded")
         if metric_failed:
             raise Failure("metric_write_failed_alerts_processed")
         if sample["errors"]:

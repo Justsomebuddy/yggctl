@@ -1,5 +1,22 @@
 # Historical report interaction contract
 
+## Health alert recovery (unreleased)
+
+With notifications on, `collect` saves a degraded observation's hourly health
+alert in `alert-state.json` before appending it to `alerts.jsonl`. A failed queue
+write remains a visible failure; a subsequent collection, including a healthy
+one, replays the original ID, timestamp and errors. Pending and queued health
+events share the existing hourly suppression rule. Notifications off defer
+existing pending events and do not stage new ones.
+
+Peer and health events share the 1000-event/1 MiB pending bounds. Invalid state,
+unreadable queue, capacity or state-write failure can prevent staging; no history
+backfill or unlimited delivery guarantee is introduced. Queue replay does not
+send directly. `alerts-forward` still requires native-recorded evidence and
+refuses an automatic resend after an ambiguous attempt. This does not establish
+remote delivery or human acknowledgement. Older collectors cannot consume health
+pending entries; drain with the new writer or preserve them before rollback.
+
 Current source: **5.11.1**. Earlier dated sections below describe historical
 behavior; the final section defines the current changed CLI contracts.
 
