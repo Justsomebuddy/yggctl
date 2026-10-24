@@ -883,3 +883,104 @@ def tcp_peer_marks(ctx, pids, sockets, conn, mode):
                 raise Failure("underlay_peer_socket_proof_missing")
             if any(mark != (mode == "direct") for mark in marks):
                 raise Failure("underlay_peer_mark_mismatch")
+
+
+# Overlay policy diagnosis: read-only explanation of host blockers reproduced in
+# the 2026-10-24 lab run. A TUN device outside every firewalld zone, or a
+# policies-drop mullvad output chain that only accepts fc00::/7, makes the
+# overlay unreachable while the console otherwise looks configured.
+@logged
+def zone_interfaces(text):
+    """Interface -> zone from `firewall-cmd --get-active-zones` output."""
+    zones: dict[str, str] = {}
+    zone = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            zone = line.split()[0]
+            continue
+        name, _, value = line.strip().partition(":")
+        if name == "interfaces" and zone:
+            for interface in value.split():
+                zones[interface] = zone
+    return zones
+
+
+@logged
+def tun_interfaces(text):
+    """TUN device names from `ip -d link show` output, in kernel order."""
+    names = []
+    current = ""
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            current = line.split(":", 2)[1].strip() if ":" in line else ""
+        elif current and "tun type tun" in line:
+            names.append(current)
+    return names
+
+
+@logged
+def mullvad_overlay_verdict(text, interface):
+    """Policy and overlay acceptance from one nft output chain listing."""
+    policy = ""
+    allowed = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        found = re.search(r"\bpolicy\s+(accept|drop)\b", stripped)
+        if found:
+            policy = found.group(1)
+        if not stripped.endswith("accept"):
+            continue
+        if interface and (f'oifname "{interface}"' in stripped or f'oif "{interface}"' in stripped):
+            allowed = True
+        if "200::/7" in stripped or "::/0" in stripped:
+            allowed = True
+    return {"policy": policy, "allows_overlay": allowed}
+
+
+@logged
+def preferred_interface(devices):
+    """Prefer an overlay-looking TUN name over tunnel devices such as wg0-mullvad."""
+    for name in devices:
+        if name.startswith(("ygg", "yg", "tun")):
+            return name
+    return devices[0] if devices else ""
+
+
+@logged
+def overlay_policy(ctx, interface=None):
+    """Read-only findings for host policy that silently rejects overlay traffic."""
+    findings = []
+    devices = tun_interfaces(ctx.run(["/usr/sbin/ip", "-d", "link", "show"]).stdout.decode())
+    target = interface or preferred_interface(devices)
+    if not target:
+        findings.append("tun_interface_not_found")
+    chain = ""
+    try:
+        chain = ctx.run(
+            ["/usr/sbin/nft", "list", "chain", "inet", "mullvad", "output"]
+        ).stdout.decode()
+    except Failure:
+        chain = ""
+    verdict = mullvad_overlay_verdict(chain, target)
+    zones: dict[str, str] = {}
+    try:
+        zones = zone_interfaces(
+            ctx.run(["/usr/bin/firewall-cmd", "--get-active-zones"]).stdout.decode()
+        )
+    except Failure:
+        zones = {}
+    # A device accepted by the kill-switch chain does not need a firewalld zone.
+    if target and zones and target not in zones and not verdict["allows_overlay"]:
+        findings.append("tun_interface_not_in_any_firewalld_zone")
+    if target and verdict["policy"] == "drop" and not verdict["allows_overlay"]:
+        findings.append("mullvad_killswitch_rejects_overlay")
+    return {
+        "interface": target or None,
+        "tun_devices": devices,
+        "firewalld_zone": zones.get(target) if target else None,
+        "mullvad_output_policy": verdict["policy"] or None,
+        "findings": findings,
+        "side_effects": "none; read-only commands only, no firewall changes",
+    }

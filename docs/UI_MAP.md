@@ -350,3 +350,10 @@ existing journal is retained. Restore the intended policy/runtime evidence and
 retry recovery; do not delete the journal to bypass proof. No automatic network
 repair, new journal format or installation change is introduced. The changed
 checks.py hash needs review in the external deployment integrity manifest.
+
+## Host overlay policy diagnosis (unreleased, 2026-10-24)
+
+| ID | Invocation / precondition | Visible result / side effects | Error / interpretation limit |
+| --- | --- | --- | --- |
+| CLI-OVERLAY-SOURCE | Root read of `ip -d link show`, `firewall-cmd --get-active-zones` and one `nft` chain | Structured JSON with interface, TUN list, zone, mullvad policy and findings | Evidence is the local command output at call time; it is not a packet capture and not a live reachability test. |
+| CLI-OVERLAY-BLOCKER | TUN outside every active zone, or policies-drop mullvad chain with no accepting rule for the interface or `200::/7` | Explicit finding names; both reproduced on a disposable host on 2026-10-24 | Absence of findings is not permission; the operator still reviews the firewall. No automatic acceptance or baseline enrollment. |
