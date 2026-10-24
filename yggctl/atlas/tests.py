@@ -519,12 +519,16 @@ class AtlasTests(ConsoleFixture):
                     ),
                 )
         root = self.paths.state / "atlas"
-        fs = list(root.glob("atlas-*"))
+        bundles = list(root.glob("atlas-*"))
+        self.assertEqual(len(bundles), 1)
+        self.assertTrue(bundles[0].is_dir())
+        self.assertEqual(bundles[0].stat().st_mode & 0o777, 0o700)
+        fs = list(bundles[0].iterdir())
         self.assertEqual(len(fs), 4)
         for p in fs:
             self.assertEqual(p.stat().st_mode & 0o777, 0o600)
             self.assertNotIn("SYNTHETIC_SECRET", read_regular(p).decode())
-        page = read_regular(next(root.glob("*.html"))).decode()
+        page = read_regular(bundles[0] / "report.html").decode()
         self.assertIn("connect-src 'none'", page)
         self.assertIn('id="search"', page)
         self.assertIn('id="reset"', page)

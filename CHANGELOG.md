@@ -15,6 +15,24 @@
   across pending and queued events. Native sender confirmation and ambiguous-send
   handling are unchanged; local recording still does not prove remote delivery.
 
+- Publish new Atlas JSON/Markdown/DOT/HTML reports as one complete private
+  directory. Prepare all formats in a reserved staging directory before an
+  atomic directory rename; failed writes do not publish partial generations.
+  The next locked report validates and discards only unpublished staging work.
+  Preserve legacy flat reports and completed bundles, including their retention
+  limit. Returned file paths now point into `atlas-<id>/report.<format>`; consumers
+  must use those paths instead of assuming a flat directory layout.
+  See the [bundle publication contract](docs/UI_MAP.md#atlas-bundle-publication).
+
+- Recover interrupted Atlas exports on the next `atlas report`: validate the
+  bounded export directory before removing only private, single-link temporary
+  files matching the console's reserved atomic-write pattern. Preserve completed
+  reports and reject unknown or unsafe entries. Hold a separate directory lock
+  through validation, recovery and publication; overlapping reports fail with
+  `atlas_export_busy` and can retry after the active report finishes. Atlas
+  acquisition and the metrics collector retain their independent locks.
+  See the [report recovery contract](docs/UI_MAP.md#atlas-export-recovery).
+
 ## [5.11.1] - 2026-10-23
 
 - Keep successful `trend [hours] json` stdout to one parseable JSON document by
