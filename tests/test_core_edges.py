@@ -101,6 +101,7 @@ class CoreEdges(ConsoleFixture):
         self.ctx.require_root = True
         with (
             patch.object(self.ctx, "root"),
+            patch("checks.state_custody"),
             patch.object(
                 core.os,
                 "fstat",

@@ -246,3 +246,11 @@ installed-runtime or upstream measurement claims. See [release scope](RELEASE-5.
 | CLI-EVENTS-LIMIT | More than 1000 matching records | Return newest 1000 in journal-provided order (no independent realtime sorting); `truncated=true` plus `WARN events_truncated` on stderr | Query at most 1001 records as a bounded overflow probe; omitted count is unknown. Narrow the time window or use a reviewed external journal query for omitted history. Successful bounded inspection remains rc0, not a completeness guarantee. |
 | CLI-EVENTS-OUTPUT | Empty, partial or exactly full window | Preserve `logs`; add `window_hours`, `limit=1000`, `returned`, `truncated` | Exactly 1000 returns `truncated=false`; metadata describes records returned by journalctl under current access/retention, not proof of a complete historical journal. Existing human completion line remains on stdout. |
 | CLI-EVENTS-FAILURE | Invalid hours, journal command/byte/time failure, malformed journal JSON | Existing nonzero failure; no partial log projection presented as successful | Existing message redaction applies before output, including the overflow record. No extra privileges, unbounded reads or relaxation of byte/time caps. |
+
+## Privileged state admission (5.12.0, 2026-10-24)
+
+Root lock-taking operations and the config/key health gate reject unsafe existing
+state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
+`state_acl_unavailable`. Missing parent state is an error, not auto-provisioning.
+No implicit permission repair or queue reset occurs. Read-only historical output
+remains unverified; see [the exact custody scope](STATE_CUSTODY.md).

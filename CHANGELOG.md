@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [5.12.0] - 2026-10-24
 
 - Treat duplicate public peer labels as ambiguous observations for alert tracking.
   Different WebSocket paths at one endpoint can share a redacted label: preserve
@@ -32,6 +32,12 @@
   `atlas_export_busy` and can retry after the active report finishes. Atlas
   acquisition and the metrics collector retain their independent locks.
   See the [report recovery contract](docs/UI_MAP.md#atlas-export-recovery).
+
+- Refuse unsafe pre-existing privileged state: validate its directory ancestry,
+  root ownership, modes, single-link regular protected files and extended ACLs
+  before a root lock and after acquisition; the config/key health gate repeats
+  admission. Never chmod/chown or repair data implicitly. See
+  [state custody](docs/STATE_CUSTODY.md) and [5.12.0](docs/RELEASE-5.12.0.md).
 
 ## [5.11.1] - 2026-10-23
 

@@ -6,6 +6,8 @@ import math
 import json
 import re
 import stat
+import errno
+import os
 import time
 
 from core import (
@@ -121,6 +123,62 @@ def trusted(path):
         if s.st_uid != 0 or s.st_mode & 0o022 or stat.S_ISLNK(s.st_mode):
             raise Failure("untrusted_deployment_path")
     return True
+
+
+@logged
+def state_member(path, *, directory=False, mode=None, optional=False):
+    """Admit existing privileged state without silently repairing its permissions."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if optional:
+            return
+        raise
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        not expected_type(info.st_mode)
+        or info.st_uid != 0
+        or info.st_mode & 0o022
+        or (not directory and info.st_nlink != 1)
+        or (mode is not None and stat.S_IMODE(info.st_mode) != mode)
+    ):
+        raise Failure("untrusted_state_custody")
+    for name in (
+        ("system.posix_acl_access", "system.posix_acl_default")
+        if directory
+        else ("system.posix_acl_access",)
+    ):
+        event("external_start", "state_acl_read")
+        try:
+            os.getxattr(path, name, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno != errno.ENODATA:
+                event("external_error", "state_acl_read", type(exc).__name__)
+                raise Failure("state_acl_unavailable") from None
+            event("external_exit", "state_acl_read", "absent")
+        else:
+            event("external_exit", "state_acl_read", "present")
+            raise Failure("state_extended_acl_requires_review")
+
+
+@logged
+def state_custody(ctx):
+    """Root-only state is pre-provisioned; role-owned research/atlas are separate."""
+    root = ctx.p.state
+    for path in (root, *root.parents):
+        state_member(path, directory=True)
+    for name, mode in (
+        (".console.lock", 0o600),
+        (".worker.lock", 0o600),
+        ("alert-state.json", 0o600),
+        ("alerts-forwarded.json", 0o600),
+        ("simplex-attempts.json", 0o600),
+        ("alerts.jsonl", 0o640),
+        ("metrics.jsonl", 0o640),
+        ("notify.state", 0o644),
+    ):
+        state_member(root / name, mode=mode, optional=True)
+    event("state", "state_custody", "existing_permissions_accepted_no_repair")
 
 
 @logged
@@ -240,6 +298,8 @@ def underlay(ctx):
 
 @logged
 def guard(ctx):
+    if ctx.require_root:
+        state_custody(ctx)
     for name in ("yggdrasil-lab.conf", "yggstack.conf"):
         config = ctx.config(name)
         if safe_config(config):
