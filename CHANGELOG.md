@@ -8,6 +8,11 @@
   and no queue evictions. Preserve existing events and limits; this flag is not
   a count of unique lost messages and does not reconstruct missing history.
 
+- Request transient-unit cleanup when an attached launcher exits unsuccessfully,
+  including signal termination, before releasing the parent broker and locks.
+  Preserve the launcher status and existing bounded stop/reap behavior. A dead
+  parent or unavailable service manager still cannot guarantee worker cleanup.
+
 ## [5.12.0] - 2026-10-24
 
 - Treat duplicate public peer labels as ambiguous observations for alert tracking.
