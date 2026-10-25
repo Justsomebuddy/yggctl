@@ -290,6 +290,8 @@ def notify(ctx, action):
         print(
             f"notify={notify_state(ctx)}; alerts.jsonl, then SimpleX via ygg-alert-forward (no ACK needed)"
         )
+        if action == "show":
+            warn_alert_admission(ctx)
 
 
 PEER_DOWN_MINUTES = 10
@@ -310,6 +312,8 @@ def load_peer_state(ctx):
     except ValueError:
         raise Failure("alert_state_invalid") from None
     if not isinstance(state, dict):
+        raise Failure("alert_state_invalid")
+    if "admission_incomplete" in state and not isinstance(state["admission_incomplete"], bool):
         raise Failure("alert_state_invalid")
     pending = state.get("pending", [])
     if not isinstance(pending, list) or len(pending) > PEER_PENDING_LIMIT:
@@ -346,6 +350,23 @@ def save_peer_state(ctx, state):
     if len(data) > PEER_STATE_LIMIT:
         raise Failure("alert_state_size_limit")
     atomic(ctx.p.state / "alert-state.json", data, 0o600)
+
+
+@logged
+def mark_alert_admission_incomplete(ctx, state):
+    """Record a refused alert intent before returning the original capacity error."""
+    if not state.get("admission_incomplete", False):
+        state["admission_incomplete"] = True
+        save_peer_state(ctx, state)
+
+
+@logged
+def warn_alert_admission(ctx):
+    if load_peer_state(ctx).get("admission_incomplete", False):
+        print(
+            "WARNING alert_admission_incomplete=yes; notification_history_may_be_incomplete=yes",
+            flush=True,
+        )
 
 
 @logged
@@ -427,6 +448,7 @@ def stage_health_alert(ctx, sample):
     if any(item.get("key") == key for item in rows(ctx, "alerts.jsonl")):
         return
     if len(pending) >= PEER_PENDING_LIMIT:
+        mark_alert_admission_incomplete(ctx, state)
         raise Failure("alert_pending_limit")
     state["pending"] = pending + [
         {
@@ -536,6 +558,7 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
     enqueue = bool(changes) and notify_state(ctx) == "on"
     if enqueue:
         if len(pending) + len(changes) > PEER_PENDING_LIMIT:
+            mark_alert_admission_incomplete(ctx, state)
             raise Failure("alert_pending_limit")
         pending = pending + [
             {"ts": sample["ts"], "id": secrets.token_hex(16), **change} for change in changes
@@ -546,6 +569,8 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
         "unstable": new_unstable,
         "pending": pending,
     }
+    if "admission_incomplete" in state:
+        new_state["admission_incomplete"] = state["admission_incomplete"]
     if new_state != state:
         save_peer_state(ctx, new_state)
         event("state", "peer_outbox", "staged" if enqueue else "tracking_saved")
@@ -688,6 +713,7 @@ def forward(ctx):
     deadline = start + FORWARD_BUDGET
     ctx.root()
     with ctx.locked():
+        warn_alert_admission(ctx)
         notice, alerts = alert_retention(rows(ctx, "alerts.jsonl"))
         evicted = notice["evicted_uncheckpointed_total"] if notice else 0
         print(f"alert queue retention: evicted_uncheckpointed_total={evicted}", flush=True)
@@ -825,6 +851,7 @@ def collect(ctx):
         if enabled:
             stage_health_alert(ctx, sample)
             flush_peer_alerts(ctx)
+        warn_alert_admission(ctx)
         if metric_failed:
             raise Failure("metric_write_failed_alerts_processed")
         if sample["errors"]:

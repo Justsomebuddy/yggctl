@@ -280,7 +280,7 @@ class AlertOutboxTests(ConsoleFixture):
                 self.assertEqual(self.state_path.read_bytes(), data)
 
     @logged
-    def test_capacity_and_byte_limits_fail_before_state_commit(self):
+    def test_capacity_marks_refusal_and_byte_limit_preserves_state(self):
         first = self.stage()[0]
         state = dict(self.initial, pending=[first])
         atomic(self.state_path, json.dumps(state))
@@ -288,7 +288,10 @@ class AlertOutboxTests(ConsoleFixture):
         with patch.object(tm, "PEER_PENDING_LIMIT", 1):
             with self.assertRaisesRegex(Failure, "alert_pending_limit"):
                 tm.peer_alerts(self.ctx, self.sample())
-        self.assertEqual(self.state_path.read_bytes(), before)
+        after = self.read_state()
+        self.assertIs(after.pop("admission_incomplete"), True)
+        self.assertEqual(after, json.loads(before))
+        before = self.state_path.read_bytes()
         with patch.object(tm, "PEER_STATE_LIMIT", 1):
             with self.assertRaisesRegex(Failure, "alert_state_size_limit"):
                 tm.save_peer_state(self.ctx, state)

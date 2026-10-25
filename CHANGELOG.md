@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Preserve a bounded admission-warning flag when the producer outbox refuses
+  new peer or health events at its capacity limit. Show the warning in `collect`,
+  `notify show` and `alerts-forward` after recovery, even with an empty backlog
+  and no queue evictions. Preserve existing events and limits; this flag is not
+  a count of unique lost messages and does not reconstruct missing history.
+
 ## [5.12.0] - 2026-10-24
 
 - Treat duplicate public peer labels as ambiguous observations for alert tracking.
