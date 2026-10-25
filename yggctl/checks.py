@@ -408,6 +408,7 @@ def underlay(ctx):
             matches = [r for r in conn if prefix + " " in r and r.split()[0] == fields[0]]
             if any(bool(re.search(r"\bmark=3905\b", r)) == (mode == "direct") for r in matches):
                 proof[pid] += 1
+    tcp_peer_marks(ctx, pids, sockets, conn, mode)
     if not all(proof.values()):
         raise Failure("underlay_own_socket_proof_missing")
     return {"mode": mode, "own_connections": list(proof.values())}
@@ -835,3 +836,50 @@ def timer_gate(ctx):
     if u.get("ActiveState") == "failed" or u.get("ExecMainStatus") != "0":
         raise Failure("collector_failed")
     collector_freshness(ctx)
+
+
+@logged
+def tcp_peer_marks(ctx, pids, sockets, conn, mode):
+    """Reject contradictory/missing evidence for configured outbound TCP peers.
+
+    Only the original conntrack direction can prove an outbound connection.
+    Local SOCKS clients, listeners and unrelated records are outside this check.
+    This is a point-in-time observation, not a route or lifetime guarantee.
+    """
+    for pid, name in zip(pids, ("yggdrasil-lab.conf", "yggstack.conf")):
+        destinations = {
+            endpoint(uri)
+            for uri in ctx.config(name)["Peers"]
+            if uri.startswith(("tcp://", "tls://", "ws://", "wss://"))
+        }
+        for line in sockets:
+            fields = line.split()
+            if (
+                len(fields) < 6
+                or fields[:2] != ["tcp", "ESTAB"]
+                or not re.search(rf"\bpid={pid},", line)
+                or fields[5] not in destinations
+                or (name == "yggstack.conf" and fields[4] == "127.0.0.1:1080")
+            ):
+                continue
+            src, sport = fields[4].rsplit(":", 1)
+            dst, dport = fields[5].rsplit(":", 1)
+            expected = (src, dst, sport, dport)
+            marks = []
+            for row in conn:
+                original = re.search(r"\bsrc=(\S+) dst=(\S+) sport=(\d+) dport=(\d+)", row)
+                if (
+                    not row.startswith("tcp ")
+                    or " ESTABLISHED " not in row
+                    or original is None
+                    or original.groups() != expected
+                ):
+                    continue
+                mark = re.search(r"\bmark=(\d+)\b", row)
+                if mark is None:
+                    raise Failure("underlay_peer_socket_proof_missing")
+                marks.append(mark[1] == "3905")
+            if not marks:
+                raise Failure("underlay_peer_socket_proof_missing")
+            if any(mark != (mode == "direct") for mark in marks):
+                raise Failure("underlay_peer_mark_mismatch")
