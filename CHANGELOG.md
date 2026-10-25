@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [5.12.2] - 2026-10-25
 
 - Do not compare stored-history trends for a sanitized peer label that covers
   more than one link. Two WebSocket paths at one endpoint (or an option the
@@ -13,6 +13,12 @@
   `insufficient_history` instead of a fabricated drift. Other labels are
   compared as before. Counts, queue IDs, payloads, cursors and stored history
   are unchanged. See [the trend contract](docs/UI_MAP.md#stored-history-trend-5110).
+- Split trend window facts, report construction, collector assessment, sample
+  folding, comparison and verdict into named, secret-safe traced helpers.
+  Preserve the single bounded history read, equal-sample split and ordering of
+  reasons. Preserve ambiguity disclosure in text as well as JSON. Detection is
+  limited to duplicate labels in compared, observed samples; unique labels do
+  not authenticate a stable origin. See [qualification and limits](docs/RELEASE-5.12.2.md).
 
 ## [5.12.1] - 2026-10-25
 
