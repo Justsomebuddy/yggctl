@@ -85,7 +85,11 @@ class TrendComposition(ConsoleFixture):
         self.store(self.history())
         path = self.paths.state / "metrics.jsonl"
         before = path.read_bytes()
-        with patch.object(tm, "window", wraps=tm.window) as window:
+        with (
+            patch.object(tm, "window", wraps=tm.window) as window,
+            patch.object(self.ctx, "api", side_effect=AssertionError("unexpected_admin_call")),
+            patch.object(self.ctx, "run", side_effect=AssertionError("unexpected_external_call")),
+        ):
             report = tm.trend(self.ctx)
         self.assertEqual(window.call_count, 1)
         self.assertEqual(path.read_bytes(), before)

@@ -1197,7 +1197,8 @@ def trend_sample_labels(entries, series, report):
     """One sample's peer rows keyed by sanitized label, with per-label row counts.
 
     Multiple rows may represent distinct links or a duplicate observation;
-    neither establishes one unambiguous series. Raw URI parts never leave here.
+    neither establishes one unambiguous series. Only display-safe labels reach
+    the report; raw URI parts are not logged.
     """
     named: dict[str, dict[str, Any]] = {}
     seen: dict[str, int] = {}
@@ -1251,7 +1252,7 @@ def trend_sample_series(row, series, side, report):
     named, seen = trend_sample_labels(entries, series, report)
     if any(count > 1 for count in seen.values()):
         # One sanitized label can cover several links (different WebSocket
-        # paths at one endpoint). Those rows observe different links and
+        # paths at one endpoint). Those rows need not observe one link and
         # must not be fused into one comparable series -- the same rule the
         # alert contract applies to duplicate labels. Other labels continue.
         series["ambiguous_samples"] += 1
