@@ -1,5 +1,42 @@
 # Changelog
 
+## [5.12.1] - 2026-10-25
+
+- Preserve a bounded admission-warning flag when the producer outbox refuses
+  new peer or health events at its capacity limit. Show the warning in `collect`,
+  `notify show` and `alerts-forward` after recovery, even with an empty backlog
+  and no queue evictions. Preserve existing events and limits; this flag is not
+  a count of unique lost messages and does not reconstruct missing history.
+
+- Request transient-unit cleanup when an attached launcher exits unsuccessfully,
+  including signal termination, before releasing the parent broker and locks.
+  Preserve the launcher status and existing bounded stop/reap behavior. A dead
+  parent or unavailable service manager still cannot guarantee worker cleanup.
+
+### Outbound QUIC runtime evidence
+
+- Correlate owned UDP sockets with a unique original-direction IPv4 conntrack
+  tuple and an active configured QUIC peer with the expected key. Include
+  unconnected UDP sockets in `ss` observations; reject unmatched, shared or
+  ambiguous sockets and contradictory mode marks, even beside valid TCP.
+- Admit only these proven outbound QUIC sockets alongside the existing loopback
+  SOCKS listener. Keep rejection of additional TCP and unproven UDP listeners.
+  This is sampled diagnostic evidence, not a VPN routing or packet-history proof.
+  See [QUIC operator behavior](docs/UI_MAP.md#outbound-quic-runtime-evidence).
+
+### Configured TCP peer evidence
+
+- Refuse runtime proof when an established socket to a configured TCP/TLS/WS/WSS
+  peer lacks original-direction conntrack evidence or has a mark contradicting
+  the current mode. A good sibling connection no longer hides the contradiction.
+- Retain the transaction journal after failed compensation/recovery proof; a
+  successful retry after evidence is repaired archives it through the existing
+  recovery path. No schema, route, firewall, delivery or deployment changes.
+  See [TCP proof operator behavior](docs/UI_MAP.md#configured-tcp-peer-evidence).
+
+- Reject multiple mark tokens as missing/ambiguous socket evidence; log stop-client
+  start and return status without replacing the failed launcher status.
+
 ## [5.12.0] - 2026-10-24
 
 - Treat duplicate public peer labels as ambiguous observations for alert tracking.
@@ -275,5 +312,5 @@ Publication does not modify installed files, services, policy or alert profiles.
 - Document GitHub Issues and pull requests as the contribution/reporting route,
   with synthetic reproducers and no disclosure of operational secrets.
 
-The current source version is 5.11.0; this source repository does not change installed files or running nodes.
+Source publication does not change installed files or running nodes; verify installed versions independently.
 No stable release, generic installer or live deployment is claimed.

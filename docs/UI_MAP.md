@@ -1,5 +1,32 @@
 # Historical report interaction contract
 
+## Outbound QUIC runtime evidence
+
+`check`, mode status and `mode direct|tunnel` retain their existing prerequisites.
+An unchanged-mode request still probes runtime state without restarting services.
+QUIC URI acceptance now agrees with the socket and underlay gates: a process-owned
+UDP UNCONN socket may contribute only when its local port/bind has a unique
+original-direction IPv4 conntrack tuple to an active configured QUIC peer with
+its pinned key. Compare the daemon's query-free remote URI with the configured
+endpoint/path; do not require the daemon to echo query parameters.
+
+Successful QUIC proof no longer needs a TCP peer. Removing the last TCP peer
+leaves proven QUIC evidence usable. The listener gate still requires the single
+STACK TCP listener on 127.0.0.1:1080 and rejects additional TCP listeners.
+Unknown, shared, malformed or ambiguously matched own UDP sockets refuse with
+`underlay_quic_*`; an unexpected destination/key or mode mark cannot be hidden
+by a good TCP socket. Direct expects mark3905; tunnel preserves the existing
+predicate mark !=3905, including nonzero marks. No addresses or keys are printed
+in new diagnostics. Own connections count observed sockets, not delivered packets.
+
+The proof samples ss, conntrack and admin API sequentially. Connection churn,
+expired/stale records or reused/shared UDP ports may require retry after
+convergence; an indistinguishable reused tuple is not historical FD attestation.
+This does not establish actual VPN routing, absence of every leak or future
+packet safety. No firewall rules, permissions or service configuration change.
+Deployers must review the changed checks.py hash in their integrity manifest.
+Compensation/recovery still retains its journal when proof refuses.
+
 ## Health alert recovery (unreleased)
 
 With notifications on, `collect` saves a degraded observation's hourly health
@@ -254,3 +281,71 @@ state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
 `state_acl_unavailable`. Missing parent state is an error, not auto-provisioning.
 No implicit permission repair or queue reset occurs. Read-only historical output
 remains unverified; see [the exact custody scope](STATE_CUSTODY.md).
+
+## Pending admission warning (5.12.1)
+
+Invocations: `collect`, `notify show`, `alerts-forward`. Existing privilege and
+locking preconditions apply. After a pending-capacity refusal has been recorded,
+these commands print:
+
+```text
+WARNING alert_admission_incomplete=yes; notification_history_may_be_incomplete=yes
+```
+
+The warning persists after queue recovery and on later successful invocations,
+including an empty forwarding backlog or first-run cursor initialisation.
+`collect` still writes its normal current-sample result; `alerts-forward` still
+reports `remaining` and `evicted_uncheckpointed_total`. Historical warning alone
+does not change exit status or send a message. Automation must inspect the warning
+as well as monitor nonzero collector/forwarder exits.
+
+Capacity refusals atomically add the boolean to existing `alert-state.json`;
+old pending events are preserved and no new queue entry is created. No automatic
+acknowledgement/reset is introduced. A malformed state/flag or unavailable write
+remains an error. Missing alerts are not fabricated from history; this output
+signals possible incomplete notification history, not an exact loss count or
+proof of delivery. Concurrent old writers can discard the new field: upgrade
+writers together and retain state before rollback.
+
+## Attached worker failure (5.12.1)
+
+Sandboxed Research, Atlas and remote commands retain their existing invocation,
+roles and admission checks. If `systemd-run` returns nonzero or dies by signal,
+the live parent now requests a stop of that command's exact transient unit and
+reaps the launcher before leaving the broker/lock scope. The original failure
+status remains nonzero; current successful output is unchanged. Each stop and
+subsequent launcher wait remains bounded by the existing 30-second timeout.
+
+This does not undo data committed before cancellation. With an available service
+manager, the tested early-launcher-failure case no longer permits the old capture
+to publish after a new invocation. Parent SIGKILL and failed/unavailable manager
+cleanup remain separate limits: neither a returned CLI error nor a released
+console lock proves all role workers have stopped. See
+[worker lifecycle scope](WORKER_IDENTITY.md#unsuccessful-launcher-exit-unreleased).
+
+## Configured TCP peer evidence
+
+`check`, mode status and an unchanged `mode direct|tunnel` request now refuse
+contradictory established TCP connections to configured TCP/TLS/WS/WSS peers.
+Each such socket must have original-direction ESTABLISHED conntrack evidence;
+reply-only tuples and stale TIME_WAIT records cannot supply that evidence.
+`underlay_peer_socket_proof_missing` means a record or exactly one explicit mark is absent;
+`underlay_peer_mark_mismatch` means at least one matching record contradicts the
+mode. Direct expects3905; tunnel preserves mark !=3905. A valid sibling flow
+cannot override either failure. The success result/output shape is unchanged.
+
+Scope is configured peer destinations owned by the two service PIDs. Local SOCKS
+clients, listening sockets, unrelated destinations and other processes are not
+expanded into a new all-traffic policy. The pre-existing minimum of runtime
+proof for each PID remains. This additional check does not claim complete route,
+VPN leak, crypto or network-history validation. Kernel/API observations are not
+an atomic snapshot; transient absence may require a retry after convergence.
+
+For example, changing a rule that marks new connections leaves old conntrack
+marks intact. A peer reconnect can then create a contradictory new connection.
+The unchanged-mode command now fails instead of printing runtime proof verified.
+If this happens during compensation or `recover-transaction --apply`, the
+existing journal is retained. Restore the intended policy/runtime evidence and
+retry recovery; do not delete the journal to bypass proof. No automatic network
+repair, new journal format or installation change is introduced. The changed
+checks.py hash needs review in the external deployment integrity manifest.

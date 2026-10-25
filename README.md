@@ -1,6 +1,6 @@
-> Source **5.12.0** composes ambiguous-peer and durable health-alert recovery,
-> complete Atlas report bundles and privileged state-custody admission.
-> See [compatibility and qualification](docs/RELEASE-5.12.0.md) and
+> Source **5.12.1** retains alert-admission warnings, cleans up unsuccessful
+> attached launchers and tightens sampled TCP/QUIC underlay evidence.
+> See [compatibility and qualification](docs/RELEASE-5.12.1.md) and
 > [state provisioning](docs/STATE_CUSTODY.md). No installer is bundled.
 
 # yggctl
@@ -66,7 +66,7 @@ sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
 The stdlib suites and supplemental Pytest cases cover synthetic behavior,
 faults and boundary conditions. Exact tested-source evidence belongs to the
-[release records](docs/RELEASE-5.12.0.md), not a timeless test-count promise.
+[release records](docs/RELEASE-5.12.1.md), not a timeless test-count promise.
 Statement/branch coverage does not prove correctness or qualify a live deployment.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).

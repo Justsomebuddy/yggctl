@@ -28,6 +28,25 @@ existing attached runner; this change does not implement the proposed separate
 root-owner-unit/socketpair lifecycle architecture or guarantee cleanup after
 arbitrary root-parent SIGKILL.
 
+### Unsuccessful launcher exit (unreleased)
+
+`systemd-run` is the attached launcher, not the worker service itself. A signal
+or unsuccessful launcher exit can leave the unit running even while its parent
+is still able to clean up. The attached runner now requests `systemctl stop`
+for that unit before returning any nonzero launcher status. It uses the same
+bounded stop/reap path as interruption; the original status is preserved.
+Successful launcher completion does not add a stop call. Stop-client I/O errors
+and timeouts are logged by exception class without replacing the original
+failure or interruption.
+
+The stop request runs while the parent still owns its broker and launch/console
+locks. This closes the reproduced early-launcher-exit path when the service
+manager is available. It is not a new per-launch storage boundary or a proof
+that every stop request succeeds. If the parent is killed or the manager cannot
+stop the unit, a worker may still finish local work and write its role's store;
+an error return must not be treated as evidence of quiescence for migration or
+repair. Inspect and stop the exact surviving units before such operations.
+
 A shared worker-lifetime `.worker.lock` is acquired BEFORE the console lock;
 an exclusive migration barrier uses that same order. Normal workers of different
 roles remain concurrent. Migration waits finitely rather than racing a fresh

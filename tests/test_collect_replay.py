@@ -4,6 +4,7 @@ import contextlib
 import datetime as dt
 import errno
 import io
+import json
 import unittest
 from unittest.mock import patch
 
@@ -149,7 +150,9 @@ class CollectReplayTests(ConsoleFixture):
         ):
             self.collect_at(15, True, error)
         self.assertIs(raised.exception.__context__, error)
-        self.assertEqual((self.paths.state / "alert-state.json").read_bytes(), before)
+        after = tm.load_peer_state(self.ctx)
+        self.assertIs(after.pop("admission_incomplete"), True)
+        self.assertEqual(after, json.loads(before))
 
     @logged
     def test_id_conflict_keeps_queue_and_original_pending(self):
