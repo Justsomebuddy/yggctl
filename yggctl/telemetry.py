@@ -1140,7 +1140,7 @@ def trend(ctx, hours=24):
         "peer_identity": "endpoint_not_key",
         "split": "equal_sample_count_drop_odd_middle",
         "rtt_semantics": "router_response_ewma_not_link_or_application_delay",
-        "label_policy": "sanitized_display_endpoint_first_row_per_sample; unknown/colliding labels do not identify origins",
+        "label_policy": "sanitized_display_endpoint_first_row_per_sample; unknown/colliding labels do not identify origins and are not compared",
         "provenance": {
             "status": "unverified_role_writable_history",
             "authenticated": False,
@@ -1154,6 +1154,8 @@ def trend(ctx, hours=24):
         "peers": [],
         "malformed_peer_samples": 0,
         "invalid_peer_rows": 0,
+        "ambiguous_labels": [],
+        "ambiguous_peer_samples": 0,
     }
     if future:
         report["collector"] = "future_timestamp"
@@ -1179,6 +1181,8 @@ def trend(ctx, hours=24):
     rtt: dict[str, list[list[Any]]] = {}
     answered, unknown = [0, 0], [0, 0]
     labels: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    ambiguous_samples = 0
     for position, (_, row) in enumerate(values):
         side = 0 if position < half else 1 if position >= newer else -1
         if side < 0:
@@ -1194,6 +1198,7 @@ def trend(ctx, hours=24):
             report["malformed_peer_samples"] += 1
             continue
         named: dict[str, dict[str, Any]] = {}
+        seen: dict[str, int] = {}
         for entry in entries:
             if not isinstance(entry, dict):
                 report["invalid_peer_rows"] += 1
@@ -1205,7 +1210,15 @@ def trend(ctx, hours=24):
                 name = labels[raw]
             else:
                 name = peer_label(raw)
+            seen[name] = seen.get(name, 0) + 1
             named.setdefault(name, entry)
+        if any(count > 1 for count in seen.values()):
+            # One sanitized label can cover several links (different WebSocket
+            # paths at one endpoint). Those rows observe different links and
+            # must not be fused into one comparable series -- the same rule the
+            # alert contract applies to duplicate labels. Other labels continue.
+            ambiguous_samples += 1
+            ambiguous.update(name for name, count in seen.items() if count > 1)
         for name, entry in named.items():
             if name not in present:
                 present[name], valid[name], up[name], rtt[name] = [0, 0], [0, 0], [0, 0], [[], []]
@@ -1242,8 +1255,17 @@ def trend(ctx, hours=24):
         detail = trend_peer_block(
             present[name], up[name], rtt[name], answered, unknown, valid[name]
         )
+        if name in ambiguous:
+            # Fused halves of several links are not one comparable series, so no
+            # drift claim is made for this label; counts stay visible.
+            detail["availability"] = None
+            detail["rtt_ms"] = None
+            detail["not_comparable"]["availability"].append("ambiguous_peer_label")
+            detail["not_comparable"]["rtt_ms"].append("ambiguous_peer_label")
         detail["peer"] = name
         report["peers"].append(detail)
+    report["ambiguous_labels"] = sorted(ambiguous)
+    report["ambiguous_peer_samples"] = ambiguous_samples
     observed_drifts = [report["node"]["up_peers"]]
     observed_drifts.extend(item["availability"] for item in report["peers"])
     observed_drifts.extend(item["rtt_ms"] for item in report["peers"])
@@ -1251,6 +1273,8 @@ def trend(ctx, hours=24):
         report["reasons"].append("no_comparable_observed_metric")
     if report["malformed_peer_samples"]:
         report["reasons"].append("malformed_peer_samples")
+    if ambiguous_samples:
+        report["reasons"].append("ambiguous_peer_labels")
     drifts = observed_drifts + [report["node"]["error_rate"]]
     verdicts = [item["verdict"] for item in drifts if item is not None]
     if report["reasons"]:
@@ -1293,6 +1317,7 @@ def trend_text(report):
         f"peer_identity={report['peer_identity']}; {report['label_policy']}",
         f"split={report['split']} (NOT equal elapsed-time halves or wall-clock uptime)",
         f"RTT={report['rtt_semantics']} (protocol router-response EWMA, NOT link/application delay)",
+        f"ambiguous_labels={report['ambiguous_labels']} ambiguous_peer_samples={report['ambiguous_peer_samples']}",
         f"node up_peers: {trend_line(report['node']['up_peers'])}",
         f"node error_rate%: {trend_line(report['node']['error_rate'])}",
         f"node not_comparable={report['node']['not_comparable']} numeric_validation={report['node']['numeric_validation']}",
