@@ -282,7 +282,7 @@ state with `untrusted_state_custody`, `state_extended_acl_requires_review`, or
 No implicit permission repair or queue reset occurs. Read-only historical output
 remains unverified; see [the exact custody scope](STATE_CUSTODY.md).
 
-## Pending admission warning (unreleased)
+## Pending admission warning (5.12.1)
 
 Invocations: `collect`, `notify show`, `alerts-forward`. Existing privilege and
 locking preconditions apply. After a pending-capacity refusal has been recorded,
@@ -307,7 +307,7 @@ signals possible incomplete notification history, not an exact loss count or
 proof of delivery. Concurrent old writers can discard the new field: upgrade
 writers together and retain state before rollback.
 
-## Attached worker failure (unreleased)
+## Attached worker failure (5.12.1)
 
 Sandboxed Research, Atlas and remote commands retain their existing invocation,
 roles and admission checks. If `systemd-run` returns nonzero or dies by signal,
@@ -320,8 +320,8 @@ This does not undo data committed before cancellation. With an available service
 manager, the tested early-launcher-failure case no longer permits the old capture
 to publish after a new invocation. Parent SIGKILL and failed/unavailable manager
 cleanup remain separate limits: neither a returned CLI error nor a released
-console lock proves all role workers have stopped. See [worker lifecycle scope]
-(WORKER_IDENTITY.md#unsuccessful-launcher-exit-unreleased).
+console lock proves all role workers have stopped. See
+[worker lifecycle scope](WORKER_IDENTITY.md#unsuccessful-launcher-exit-unreleased).
 
 ## Configured TCP peer evidence
 
@@ -329,7 +329,7 @@ console lock proves all role workers have stopped. See [worker lifecycle scope]
 contradictory established TCP connections to configured TCP/TLS/WS/WSS peers.
 Each such socket must have original-direction ESTABLISHED conntrack evidence;
 reply-only tuples and stale TIME_WAIT records cannot supply that evidence.
-`underlay_peer_socket_proof_missing` means a record or explicit mark is absent;
+`underlay_peer_socket_proof_missing` means a record or exactly one explicit mark is absent;
 `underlay_peer_mark_mismatch` means at least one matching record contradicts the
 mode. Direct expects3905; tunnel preserves mark !=3905. A valid sibling flow
 cannot override either failure. The success result/output shape is unchanged.

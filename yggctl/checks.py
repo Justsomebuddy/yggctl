@@ -875,10 +875,10 @@ def tcp_peer_marks(ctx, pids, sockets, conn, mode):
                     or original.groups() != expected
                 ):
                     continue
-                mark = re.search(r"\bmark=(\d+)\b", row)
-                if mark is None:
+                mark = re.findall(r"\bmark=(\d+)\b", row)
+                if len(mark) != 1:
                     raise Failure("underlay_peer_socket_proof_missing")
-                marks.append(mark[1] == "3905")
+                marks.append(mark[0] == "3905")
             if not marks:
                 raise Failure("underlay_peer_socket_proof_missing")
             if any(mark != (mode == "direct") for mark in marks):
