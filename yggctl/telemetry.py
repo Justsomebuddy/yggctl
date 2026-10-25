@@ -1116,31 +1116,42 @@ def trend_peer(line, seen=None):
 
 
 @logged
-def trend(ctx, hours=24):
-    """One bounded history snapshot; one fused aggregation, no API calls or writes."""
-    future: list[dt.datetime] = []
-    values, invalid = window(ctx, hours, future=future)
+def trend_window(values, future):
+    """Timing and coverage facts of the stored window.
+
+    Kept apart from the report so the aggregation below reads as one pass over
+    the samples instead of a mix of statistics and dictionary construction.
+    """
     stamps = [at for at, _ in values]
-    span = (stamps[-1] - stamps[0]).total_seconds() / 60
     intervals = [(b - a).total_seconds() / 60 for a, b in zip(stamps, stamps[1:]) if b > a]
-    cadence = statistics.median(intervals) if intervals else None
-    age = (dt.datetime.now(dt.timezone.utc) - stamps[-1]).total_seconds() / 60
-    observed = sum(row.get("peers_observed") is True for _, row in values)
-    report = {
+    return {
+        "stamps": stamps,
+        "span": (stamps[-1] - stamps[0]).total_seconds() / 60,
+        "cadence": statistics.median(intervals) if intervals else None,
+        "age": (dt.datetime.now(dt.timezone.utc) - stamps[-1]).total_seconds() / 60,
+        "observed": sum(row.get("peers_observed") is True for _, row in values),
+        "future": len(future),
+    }
+
+
+@logged
+def trend_report(values, facts, invalid, hours):
+    """The report header: what the window is, before any comparison is attempted."""
+    return {
         "window_hours": hours,
         "samples": len(values),
-        "distinct_samples": len(set(stamps)),
+        "distinct_samples": len(set(facts["stamps"])),
         "invalid_records": invalid,
-        "future_samples": len(future),
-        "span_minutes": round(span, 1),
-        "sampling_minutes": round(cadence, 3) if cadence is not None else None,
-        "collector_age_minutes": round(age, 1),
-        "observed_samples": observed,
-        "unobserved_samples": len(values) - observed,
+        "future_samples": facts["future"],
+        "span_minutes": round(facts["span"], 1),
+        "sampling_minutes": round(facts["cadence"], 3) if facts["cadence"] is not None else None,
+        "collector_age_minutes": round(facts["age"], 1),
+        "observed_samples": facts["observed"],
+        "unobserved_samples": len(values) - facts["observed"],
         "peer_identity": "endpoint_not_key",
         "split": "equal_sample_count_drop_odd_middle",
         "rtt_semantics": "router_response_ewma_not_link_or_application_delay",
-        "label_policy": "sanitized_display_endpoint_first_row_per_sample; unknown/colliding labels do not identify origins",
+        "label_policy": "sanitized_display_endpoint_first_row_per_sample; detected colliding labels do not identify origins and are not compared; undetected collisions and unknown labels still do not prove origin",
         "provenance": {
             "status": "unverified_role_writable_history",
             "authenticated": False,
@@ -1154,74 +1165,137 @@ def trend(ctx, hours=24):
         "peers": [],
         "malformed_peer_samples": 0,
         "invalid_peer_rows": 0,
+        "ambiguous_labels": [],
+        "ambiguous_peer_samples": 0,
     }
-    if future:
+
+
+@logged
+def trend_collector_state(report, facts, values):
+    """Collector freshness and the reasons the window is too thin to compare."""
+    if facts["future"]:
         report["collector"] = "future_timestamp"
         report["reasons"].append("future_samples_present")
-    elif age > max(10.0, TREND_STALE_FACTOR * (cadence or 1)):
+    elif facts["age"] > max(10.0, TREND_STALE_FACTOR * (facts["cadence"] or 1)):
         report["reasons"].append("collector_stale_beyond_sampling_interval")
     else:
         report["collector"] = "fresh"
-    if len(set(stamps)) < TREND_MIN_SAMPLES:
+    if len(set(facts["stamps"])) < TREND_MIN_SAMPLES:
         report["reasons"].append(f"fewer_than_{TREND_MIN_SAMPLES}_samples")
-    if span < TREND_MIN_SPAN_MINUTES:
+    if facts["span"] < TREND_MIN_SPAN_MINUTES:
         report["reasons"].append(f"span_below_{TREND_MIN_SPAN_MINUTES}_minutes")
-    if not observed:
+    if not facts["observed"]:
         report["reasons"].append("no_observed_samples")
-    elif observed * TREND_MAX_UNOBSERVED_SHARE < len(values) * (TREND_MAX_UNOBSERVED_SHARE - 1):
+    elif facts["observed"] * TREND_MAX_UNOBSERVED_SHARE < len(values) * (
+        TREND_MAX_UNOBSERVED_SHARE - 1
+    ):
         report["reasons"].append(f"unobserved_above_{100 // TREND_MAX_UNOBSERVED_SHARE}_percent")
+
+
+@logged
+def trend_sample_labels(entries, series, report):
+    """One sample's peer rows keyed by sanitized label, with per-label row counts.
+
+    Multiple rows may represent distinct links or a duplicate observation;
+    neither establishes one unambiguous series. Only display-safe labels reach
+    the report; raw URI parts are not logged.
+    """
+    named: dict[str, dict[str, Any]] = {}
+    seen: dict[str, int] = {}
+    labels = series["labels"]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            report["invalid_peer_rows"] += 1
+            continue
+        raw = entry.get("r")
+        if isinstance(raw, str):
+            if raw not in labels:
+                labels[raw] = peer_label(raw)
+            name = labels[raw]
+        else:
+            name = peer_label(raw)
+        seen[name] = seen.get(name, 0) + 1
+        named.setdefault(name, entry)
+    return named, seen
+
+
+@logged
+def trend_accumulate(named, series, side):
+    """Fold one sample's labelled rows into the per-label series of that half."""
+    for name, entry in named.items():
+        if name not in series["present"]:
+            series["present"][name] = [0, 0]
+            series["valid"][name] = [0, 0]
+            series["up"][name] = [0, 0]
+            series["rtt"][name] = [[], []]
+        series["present"][name][side] += 1
+        if type(entry.get("up")) is bool:
+            series["valid"][name][side] += 1
+            if entry["up"] is True:
+                series["up"][name][side] += 1
+                series["rtt"][name][side].append(entry.get("rtt"))
+
+
+@logged
+def trend_sample_series(row, series, side, report):
+    """Fold one sample into the per-side counters and the per-label series."""
+    series["node_fail"][side].append(1.0 if row.get("errors") else 0.0)
+    if row.get("peers_observed") is not True:
+        series["unknown"][side] += 1
+        return
+    series["answered"][side] += 1
+    series["node_up"][side].append(row.get("up"))
+    entries = row.get("peers")
+    if not isinstance(entries, list):
+        report["malformed_peer_samples"] += 1
+        return
+    named, seen = trend_sample_labels(entries, series, report)
+    if any(count > 1 for count in seen.values()):
+        # One sanitized label can cover several links (different WebSocket
+        # paths at one endpoint). Those rows need not observe one link and
+        # must not be fused into one comparable series -- the same rule the
+        # alert contract applies to duplicate labels. Other labels continue.
+        series["ambiguous_samples"] += 1
+        series["ambiguous"].update(name for name, count in seen.items() if count > 1)
+        event("state", "trend_ambiguity", "sample_label_collision")
+    trend_accumulate(named, series, side)
+
+
+@logged
+def trend_peer_series(values, report):
+    """One pass over the samples: per-side node counters and per-label series."""
     half, newer = len(values) // 2, len(values) - len(values) // 2
-    node_up: list[list[Any]] = [[], []]
-    node_fail: list[list[float]] = [[], []]
-    present: dict[str, list[int]] = {}
-    valid: dict[str, list[int]] = {}
-    up: dict[str, list[int]] = {}
-    rtt: dict[str, list[list[Any]]] = {}
-    answered, unknown = [0, 0], [0, 0]
-    labels: dict[str, str] = {}
+    series: dict[str, Any] = {
+        "node_up": [[], []],
+        "node_fail": [[], []],
+        "present": {},
+        "valid": {},
+        "up": {},
+        "rtt": {},
+        "answered": [0, 0],
+        "unknown": [0, 0],
+        "labels": {},
+        "ambiguous": set(),
+        "ambiguous_samples": 0,
+    }
     for position, (_, row) in enumerate(values):
         side = 0 if position < half else 1 if position >= newer else -1
         if side < 0:
             continue
-        node_fail[side].append(1.0 if row.get("errors") else 0.0)
-        if row.get("peers_observed") is not True:
-            unknown[side] += 1
-            continue
-        answered[side] += 1
-        node_up[side].append(row.get("up"))
-        entries = row.get("peers")
-        if not isinstance(entries, list):
-            report["malformed_peer_samples"] += 1
-            continue
-        named: dict[str, dict[str, Any]] = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                report["invalid_peer_rows"] += 1
-                continue
-            raw = entry.get("r")
-            if isinstance(raw, str):
-                if raw not in labels:
-                    labels[raw] = peer_label(raw)
-                name = labels[raw]
-            else:
-                name = peer_label(raw)
-            named.setdefault(name, entry)
-        for name, entry in named.items():
-            if name not in present:
-                present[name], valid[name], up[name], rtt[name] = [0, 0], [0, 0], [0, 0], [[], []]
-            present[name][side] += 1
-            if type(entry.get("up")) is bool:
-                valid[name][side] += 1
-                if entry["up"] is True:
-                    up[name][side] += 1
-                    rtt[name][side].append(entry.get("rtt"))
-    failures = [100.0 * sum(part) / len(part) if part else None for part in node_fail]
+        trend_sample_series(row, series, side, report)
+    return series
+
+
+@logged
+def trend_node_block(series):
+    """Node-level drift, plus the reasons a node metric could not be compared."""
+    failures = [100.0 * sum(part) / len(part) if part else None for part in series["node_fail"]]
     missing: dict[str, list[str]] = {"up_peers": [], "error_rate": []}
     audit = {"checked": 0, "invalid": 0}
-    report["node"] = {
+    return {
         "up_peers": trend_drift(
-            node_up[0],
-            node_up[1],
+            series["node_up"][0],
+            series["node_up"][1],
             TREND_PEER_COUNT_FLOOR,
             worse_higher=False,
             reasons=missing["up_peers"],
@@ -1231,26 +1305,55 @@ def trend(ctx, hours=24):
             trend_single(failures[0]),
             trend_single(failures[1]),
             TREND_ERROR_FLOOR,
-            counts=[len(node_fail[0]), len(node_fail[1])],
+            counts=[len(series["node_fail"][0]), len(series["node_fail"][1])],
             reasons=missing["error_rate"],
             audit=audit,
         ),
         "not_comparable": missing,
         "numeric_validation": audit,
     }
-    for name in sorted(present):
+
+
+@logged
+def trend_peer_details(series):
+    """One comparable-or-not block per label, sorted by label."""
+    details = []
+    for name in sorted(series["present"]):
         detail = trend_peer_block(
-            present[name], up[name], rtt[name], answered, unknown, valid[name]
+            series["present"][name],
+            series["up"][name],
+            series["rtt"][name],
+            series["answered"],
+            series["unknown"],
+            series["valid"][name],
         )
+        if name in series["ambiguous"]:
+            # Fused halves of several links are not one comparable series, so no
+            # drift claim is made for this label; counts stay visible.
+            detail["availability"] = None
+            detail["rtt_ms"] = None
+            detail["not_comparable"]["availability"].append("ambiguous_peer_label")
+            detail["not_comparable"]["rtt_ms"].append("ambiguous_peer_label")
+            event("state", "trend_ambiguity", "ambiguous_label_withheld")
         detail["peer"] = name
-        report["peers"].append(detail)
-    observed_drifts = [report["node"]["up_peers"]]
-    observed_drifts.extend(item["availability"] for item in report["peers"])
-    observed_drifts.extend(item["rtt_ms"] for item in report["peers"])
+        details.append(detail)
+    return details
+
+
+@logged
+def trend_verdict(report, observed_drifts, ambiguous_samples):
+    """The one verdict the report carries, from the reasons and the drifts.
+
+    The "nothing comparable was observed" reason is decided on the observed
+    drifts alone: the node error rate is always a number, so including it here
+    would report a comparable history that does not exist.
+    """
     if not any(item is not None for item in observed_drifts):
         report["reasons"].append("no_comparable_observed_metric")
     if report["malformed_peer_samples"]:
         report["reasons"].append("malformed_peer_samples")
+    if ambiguous_samples:
+        report["reasons"].append("ambiguous_peer_labels")
     drifts = observed_drifts + [report["node"]["error_rate"]]
     verdicts = [item["verdict"] for item in drifts if item is not None]
     if report["reasons"]:
@@ -1261,6 +1364,26 @@ def trend(ctx, hours=24):
         report["verdict"] = "improving"
     else:
         report["verdict"] = "stable"
+    return report["verdict"]
+
+
+@logged
+def trend(ctx, hours=24):
+    """One bounded history snapshot; one fused aggregation, no API calls or writes."""
+    future: list[dt.datetime] = []
+    values, invalid = window(ctx, hours, future=future)
+    facts = trend_window(values, future)
+    report = trend_report(values, facts, invalid, hours)
+    trend_collector_state(report, facts, values)
+    series = trend_peer_series(values, report)
+    report["node"] = trend_node_block(series)
+    report["peers"] = trend_peer_details(series)
+    report["ambiguous_labels"] = sorted(series["ambiguous"])
+    report["ambiguous_peer_samples"] = series["ambiguous_samples"]
+    observed_drifts = [report["node"]["up_peers"]]
+    observed_drifts.extend(item["availability"] for item in report["peers"])
+    observed_drifts.extend(item["rtt_ms"] for item in report["peers"])
+    trend_verdict(report, observed_drifts, series["ambiguous_samples"])
     event(
         "state", "trend", f"samples={len(values)} future={len(future)} verdict={report['verdict']}"
     )
@@ -1293,6 +1416,7 @@ def trend_text(report):
         f"peer_identity={report['peer_identity']}; {report['label_policy']}",
         f"split={report['split']} (NOT equal elapsed-time halves or wall-clock uptime)",
         f"RTT={report['rtt_semantics']} (protocol router-response EWMA, NOT link/application delay)",
+        f"ambiguous_labels={report['ambiguous_labels']} ambiguous_peer_samples={report['ambiguous_peer_samples']}",
         f"node up_peers: {trend_line(report['node']['up_peers'])}",
         f"node error_rate%: {trend_line(report['node']['error_rate'])}",
         f"node not_comparable={report['node']['not_comparable']} numeric_validation={report['node']['numeric_validation']}",

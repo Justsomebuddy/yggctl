@@ -1,5 +1,25 @@
 # Changelog
 
+## [5.12.2] - 2026-10-25
+
+- Do not compare stored-history trends for a sanitized peer label that covers
+  more than one link. Two WebSocket paths at one endpoint (or an option the
+  sanitizer drops) render to one label, and the trend previously fused their
+  rows in sample order: two links with constant but different latencies were
+  reported as one `rtt_ms` series with a `degrading` verdict. `trend` now
+  reports `ambiguous_labels` and `ambiguous_peer_samples`, marks that label's
+  availability and RTT as `not_comparable` with `ambiguous_peer_label`, and adds
+  the fixed `ambiguous_peer_labels` reason, so the aggregate is
+  `insufficient_history` instead of a fabricated drift. Other labels are
+  compared as before. Counts, queue IDs, payloads, cursors and stored history
+  are unchanged. See [the trend contract](docs/UI_MAP.md#stored-history-trend-5110).
+- Split trend window facts, report construction, collector assessment, sample
+  folding, comparison and verdict into named, secret-safe traced helpers.
+  Preserve the single bounded history read, equal-sample split and ordering of
+  reasons. Preserve ambiguity disclosure in text as well as JSON. Detection is
+  limited to duplicate labels in compared, observed samples; unique labels do
+  not authenticate a stable origin. See [qualification and limits](docs/RELEASE-5.12.2.md).
+
 ## [5.12.1] - 2026-10-25
 
 - Preserve a bounded admission-warning flag when the producer outbox refuses

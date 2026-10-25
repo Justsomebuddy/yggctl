@@ -137,8 +137,12 @@ class IdentityFreshnessContract(ConsoleFixture):
             "research/model.py:peer_link_groups": 1,  # Keyless rows excluded.
             # `trend` reports a historical median of the projected `up` field; it makes no
             # liveness claim and does not feed a gate. Strict projected bool checks
-            # are not raw availability/key identity claims.
-            "telemetry.py:trend": 3,
+            # are not raw availability/key identity claims. The aggregation was split
+            # into named helpers. Count both projected peer reads and the new internal
+            # series["up"] folds/pass-throughs required by this literal-access guard.
+            "telemetry.py:trend_sample_series": 1,
+            "telemetry.py:trend_accumulate": 4,
+            "telemetry.py:trend_peer_details": 1,
             "telemetry.py:trend_peer": 2,
         }
         root = Path(checks.__file__).parent
