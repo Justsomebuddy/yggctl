@@ -32,6 +32,26 @@ CHILD_GUARD = (
 )
 
 
+class OutboundPaused(Failure):
+    """An explicit operator hold, not a native receipt or a transport failure."""
+
+
+@logged
+def require_outbound_enabled(cfg):
+    """Honor the operator's shared-lock sidecar without changing profile binding."""
+    event("external_start", "simplex_pause_metadata")
+    try:
+        info = Path(cfg["lock"]).with_name("outbound.paused").lstat()
+    except FileNotFoundError:
+        event("external_exit", "simplex_pause_metadata", "absent")
+        return
+    event("external_exit", "simplex_pause_metadata", "present")
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise Failure("simplex_pause_not_private")
+    event("state", "simplex_handoff", "operator_paused_retained")
+    raise OutboundPaused("simplex_outbound_paused")
+
+
 @logged
 def configuration(ctx):
     path = ctx.p.etc / "simplex-sender.json"
@@ -233,6 +253,7 @@ def handoff(ctx, event_id, payload, timeout=20):
         raise Failure("simplex_message_limit")
     deadline = time.monotonic() + min(20, timeout)
     with profile_lock(cfg["lock"], deadline) as lock_fd:
+        require_outbound_enabled(cfg)
         binding, contact, item = lookup(cfg, marker, text, deadline)
         key = hashlib.sha256(event_id.encode()).hexdigest()
         body = hashlib.sha256(text.encode()).hexdigest()

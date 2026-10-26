@@ -1,3 +1,13 @@
+## Operator outbound pause (5.12.4)
+
+| ID | Entry / state | Result and limits |
+|---|---|---|
+| ALERT-OPERATOR-PAUSE | `alerts-forward`, trusted shared-lock sibling `outbound.paused` | `state=paused deferred=N remaining=N`, no new handoff intent/CLI or deferred cursor checkpoint. Pure hold exits0: intentional deferral, NOT delivery or an empty queue. |
+| ALERT-PAUSE-CUSTODY | Sidecar symlink, special file, wrong owner or group/other access | Nonzero/pending, never a successful deferral or native send. |
+| ALERT-PAUSE-RESUME | Explicit external hold release, then forwarding/path activation | Existing ambiguous attempts stay pending without blind retry; no automatic pause watcher. Earlier failure in a run still fails even if a later event observes the hold. |
+
+See [native hold/receipt boundaries](NATIVE_HANDOFF.md#operator-outbound-pause-5124).
+
 # Historical report interaction contract
 
 ## Outbound QUIC runtime evidence

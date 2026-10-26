@@ -1,3 +1,8 @@
+> Source **5.12.4** honors the native profile's operator outbound pause. Paused
+> forwarding is explicitly deferred, not delivered; old ambiguous attempts remain
+> unresent. See [the release record](docs/RELEASE-5.12.4.md) and
+> [native handoff / pause contract](docs/NATIVE_HANDOFF.md).
+
 > Source **5.12.3** does not turn skipped collections into confirmed peer downtime.
 > Long observation gaps restart unconfirmed outages; already-alerted recoveries
 > disclose uncertainty without duplicating down events.
@@ -67,7 +72,7 @@ sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
 The stdlib suites and supplemental Pytest cases cover synthetic behavior,
 faults and boundary conditions. Exact tested-source evidence belongs to the
-[release records](docs/RELEASE-5.12.3.md), not a timeless test-count promise.
+[release records](docs/RELEASE-5.12.4.md), not a timeless test-count promise.
 Statement/branch coverage does not prove correctness or qualify a live deployment.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).

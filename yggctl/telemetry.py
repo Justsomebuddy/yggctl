@@ -754,6 +754,7 @@ def forward(ctx):
             return
         done, failures, processed = set(sent), 0, 0
         pending = [(a, aid) for a, aid in zip(alerts, ids) if aid not in done]
+        paused = False
         for alert, aid in pending:
             if aid in done:
                 continue
@@ -765,6 +766,11 @@ def forward(ctx):
             try:
                 simplex_sender.handoff(ctx, aid, alert_message(alert), timeout=min(20, remaining))
                 success = True
+            except simplex_sender.OutboundPaused:
+                processed -= 1
+                paused = True
+                event("state", "alert_forward", "operator_paused_retained")
+                break
             except (Failure, OSError, ValueError, KeyError, simplex_sender.sqlite3.Error):
                 success = False
             if success:
@@ -790,11 +796,12 @@ def forward(ctx):
         print(
             f"[1/1] alerts handoff finished; processed={processed} errors={failures} remaining={left} "
             f"evicted_uncheckpointed_total={evicted} "
+            f"state={'paused' if paused else 'finished'} deferred={left if paused else 0} "
             f"elapsed={time.monotonic() - start:.2f}s; native local recording is NOT delivery/human ACK"
         )
         if failures:
             raise Failure(f"alert_forward_failed:count={failures}")
-        if left:
+        if left and not paused:
             # Existing Restart=on-failure schedules backlog even without a new path event.
             raise Failure("alert_forward_budget_pending")
 
