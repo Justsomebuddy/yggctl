@@ -1,6 +1,7 @@
 """Fail-closed structured health checks, including PID-bound underlay proof."""
 
 from pathlib import Path
+from typing import Any
 import ipaddress
 import math
 import json
@@ -885,10 +886,19 @@ def tcp_peer_marks(ctx, pids, sockets, conn, mode):
                 raise Failure("underlay_peer_mark_mismatch")
 
 
-# Overlay policy diagnosis: read-only explanation of host blockers reproduced in
-# the 2026-10-24 lab run. A TUN device outside every firewalld zone, or a
-# policies-drop mullvad output chain that only accepts fc00::/7, makes the
-# overlay unreachable while the console otherwise looks configured.
+# Overlay policy diagnosis: a read-only, static interpretation of the effective
+# nftables ruleset. It does not inject packets and never edits rules. Text output
+# is parsed for firewalld zones only; nft rules come from the JSON schema, so a
+# rule that only matches source addresses, a negated prefix, a port or an
+# unreachable accept cannot be mistaken for a general overlay allowance.
+OVERLAY_PREFIX = ipaddress.ip_network("200::/7")
+OVERLAY_SAMPLE = ipaddress.ip_address("200::1")
+OVERLAY_MAX_DEPTH = 4
+OVERLAY_PATH_LIMIT = 64
+OVERLAY_TERMINAL = ("accept", "drop", "reject")
+OVERLAY_NON_MATCH = ("counter", "log", "comment", "limit", "quota", "notrack")
+
+
 @logged
 def zone_interfaces(text):
     """Interface -> zone from `firewall-cmd --get-active-zones` output."""
@@ -921,25 +931,6 @@ def tun_interfaces(text):
 
 
 @logged
-def mullvad_overlay_verdict(text, interface):
-    """Policy and overlay acceptance from one nft output chain listing."""
-    policy = ""
-    allowed = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        found = re.search(r"\bpolicy\s+(accept|drop)\b", stripped)
-        if found:
-            policy = found.group(1)
-        if not stripped.endswith("accept"):
-            continue
-        if interface and (f'oifname "{interface}"' in stripped or f'oif "{interface}"' in stripped):
-            allowed = True
-        if "200::/7" in stripped or "::/0" in stripped:
-            allowed = True
-    return {"policy": policy, "allows_overlay": allowed}
-
-
-@logged
 def preferred_interface(devices):
     """Prefer an overlay-looking TUN name over tunnel devices such as wg0-mullvad."""
     for name in devices:
@@ -949,38 +940,222 @@ def preferred_interface(devices):
 
 
 @logged
+def nft_chains(data):
+    """Index (family, table, chain) -> policy and ordered rules from `nft -j`."""
+    if not isinstance(data, dict) or not isinstance(data.get("nftables"), list):
+        raise Failure("invalid_nft_json")
+    chains: dict[tuple[str, str, str], dict] = {}
+    rules: dict[tuple[str, str, str], list] = {}
+    for item in data["nftables"]:
+        if not isinstance(item, dict) or len(item) != 1:
+            continue
+        kind, body = next(iter(item.items()))
+        if not isinstance(body, dict):
+            continue
+        family, table = body.get("family"), body.get("table")
+        member = body.get("name") if kind == "chain" else body.get("chain")
+        if kind not in ("chain", "rule"):
+            continue
+        if not isinstance(family, str) or not isinstance(table, str) or not isinstance(member, str):
+            continue
+        key = (family, table, member)
+        if kind == "chain":
+            chains[key] = {"policy": body.get("policy") or "", "rules": []}
+        else:
+            rules.setdefault(key, []).append(body)
+    for key, rows in rules.items():
+        chains.setdefault(key, {"policy": "", "rules": []})["rules"] = rows
+    return chains
+
+
+@logged
+def overlay_prefix_match(right, op):
+    """`match`/`miss`/`unknown` for the overlay sample address, never a guess."""
+    if isinstance(right, str):
+        values = [right]
+    elif isinstance(right, list) and right and all(isinstance(v, str) for v in right):
+        values = right
+    else:
+        return "unknown"
+    try:
+        hit = any(OVERLAY_SAMPLE in ipaddress.ip_network(value, strict=False) for value in values)
+    except ValueError:
+        return "unknown"
+    return "match" if hit == (op == "==") else "miss"
+
+
+@logged
+def overlay_match(match, interface):
+    """`match`/`miss`/`unknown` for one nft match expression."""
+    if not isinstance(match, dict) or len(match.get("left") or {}) != 1:
+        return "unknown"
+    op = match.get("op")
+    if op not in ("==", "!="):
+        return "unknown"
+    kind, spec = next(iter(match["left"].items()))
+    if kind == "meta" and isinstance(spec, dict):
+        if spec.get("key") in ("oif", "oifname") and isinstance(match.get("right"), str):
+            hit = match["right"] == interface
+            return "match" if hit == (op == "==") else "miss"
+        return "unknown"
+    if kind == "payload" and isinstance(spec, dict):
+        if spec.get("protocol") == "ip6" and spec.get("field") == "daddr":
+            return overlay_prefix_match(match.get("right"), op)
+        return "unknown"
+    return "unknown"
+
+
+@logged
+def overlay_rule(exprs, interface):
+    """`match`/`miss`/`unknown`, the terminal action and its target for one rule."""
+    state, action, target = "match", None, None
+    for expr in exprs or []:
+        if not isinstance(expr, dict) or len(expr) != 1:
+            state = "unknown"
+            continue
+        kind, body = next(iter(expr.items()))
+        if kind in OVERLAY_NON_MATCH:
+            continue
+        if kind in OVERLAY_TERMINAL:
+            return state, kind, None
+        if kind == "return":
+            return state, "return", None
+        if kind in ("jump", "goto"):
+            return state, kind, body.get("target") if isinstance(body, dict) else None
+        if kind != "match":
+            state = "unknown"
+            continue
+        outcome = overlay_match(body, interface)
+        if outcome == "miss":
+            return "miss", None, None
+        if outcome == "unknown":
+            state = "unknown"
+    return state, action, target
+
+
+@logged
+def overlay_chain(chains, key, interface, depth=0):
+    """Static verdict for one chain: allowed/denied/conditional/unknown."""
+    chain = chains.get(key)
+    if chain is None:
+        return {"verdict": "unknown", "reason": "chain_missing", "matched": None, "path": []}
+    unresolved = False
+    path: list[dict[str, Any]] = []
+    for rule in chain["rules"]:
+        state, action, target = overlay_rule(rule.get("expr"), interface)
+        if len(path) < OVERLAY_PATH_LIMIT:
+            path.append({"handle": rule.get("handle"), "state": state, "action": action})
+        if state == "miss":
+            continue
+        if action is None:
+            continue
+        if action == "return":
+            unresolved = state == "unknown"
+            break
+        if action in ("jump", "goto"):
+            if depth >= OVERLAY_MAX_DEPTH or not isinstance(target, str):
+                unresolved = True
+                continue
+            nested = overlay_chain(chains, (key[0], key[1], target), interface, depth + 1)
+            if nested["verdict"] == "unknown":
+                unresolved = True
+                continue
+            verdict = nested["verdict"] if state == "match" and not unresolved else "conditional"
+            return {
+                "verdict": verdict,
+                "reason": "nested_chain",
+                "matched": rule.get("handle"),
+                "path": path,
+            }
+        if state == "unknown" or unresolved:
+            unresolved = True
+            continue
+        return {
+            "verdict": "allowed" if action == "accept" else "denied",
+            "reason": None,
+            "matched": rule.get("handle"),
+            "path": path,
+        }
+    policy = chain["policy"]
+    if policy not in ("accept", "drop"):
+        return {"verdict": "unknown", "reason": "chain_no_verdict", "matched": None, "path": path}
+    verdict = "allowed" if policy == "accept" else "denied"
+    return {
+        "verdict": "conditional" if unresolved else verdict,
+        "reason": "unresolved_rule" if unresolved else None,
+        "matched": None,
+        "path": path,
+    }
+
+
+@logged
 def overlay_policy(ctx, interface=None):
     """Read-only findings for host policy that silently rejects overlay traffic."""
-    findings = []
-    devices = tun_interfaces(ctx.run(["/usr/sbin/ip", "-d", "link", "show"]).stdout.decode())
+    limitations: list[str] = []
+    findings: list[str] = []
+    inspection = {"ip": "ok", "nft": "ok", "firewalld": "ok"}
+    devices: list[str] = []
+    try:
+        devices = tun_interfaces(ctx.run(["/usr/sbin/ip", "-d", "link", "show"]).stdout.decode())
+    except Failure:
+        inspection["ip"] = "unavailable"
+        limitations.append("ip_inspection_unavailable")
     target = interface or preferred_interface(devices)
     if not target:
         findings.append("tun_interface_not_found")
-    chain = ""
-    try:
-        chain = ctx.run(
-            ["/usr/sbin/nft", "list", "chain", "inet", "mullvad", "output"]
-        ).stdout.decode()
-    except Failure:
-        chain = ""
-    verdict = mullvad_overlay_verdict(chain, target)
     zones: dict[str, str] = {}
     try:
         zones = zone_interfaces(
             ctx.run(["/usr/bin/firewall-cmd", "--get-active-zones"]).stdout.decode()
         )
     except Failure:
-        zones = {}
-    # A device accepted by the kill-switch chain does not need a firewalld zone.
-    if target and zones and target not in zones and not verdict["allows_overlay"]:
-        findings.append("tun_interface_not_in_any_firewalld_zone")
-    if target and verdict["policy"] == "drop" and not verdict["allows_overlay"]:
+        inspection["firewalld"] = "unavailable"
+    chains: dict[tuple[str, str, str], dict] = {}
+    try:
+        chains = nft_chains(json.loads(ctx.run(["/usr/sbin/nft", "-j", "list", "ruleset"]).stdout))
+    except Failure as exc:
+        inspection["nft"] = "unavailable"
+        limitations.append(
+            "nft_inspection_unavailable"
+            if str(exc).startswith("external_unavailable")
+            else "nft_inspection_failed"
+        )
+    except ValueError:
+        inspection["nft"] = "invalid_json"
+        limitations.append("nft_inspection_invalid_json")
+    key = ("inet", "mullvad", "output")
+    result = (
+        overlay_chain(chains, key, target)
+        if inspection["nft"] == "ok"
+        else {
+            "verdict": "unknown",
+            "reason": "nft_inspection_unavailable",
+            "matched": None,
+            "path": [],
+        }
+    )
+    if result["reason"] == "chain_missing":
+        limitations.append("mullvad_chain_missing")
+    if result["verdict"] == "denied":
         findings.append("mullvad_killswitch_rejects_overlay")
+    if result["verdict"] == "conditional":
+        limitations.append("conditional_rules_require_packet_trace")
+    if result["verdict"] == "unknown" and result["reason"] not in (
+        "chain_missing",
+        "nft_inspection_unavailable",
+    ):
+        limitations.append("overlay_verdict_unknown")
     return {
         "interface": target or None,
         "tun_devices": devices,
         "firewalld_zone": zones.get(target) if target else None,
-        "mullvad_output_policy": verdict["policy"] or None,
+        "firewalld_evidence": "zone_membership_is_not_permission" if target in zones else None,
+        "mullvad_output_policy": chains.get(key, {}).get("policy") or None,
+        "overlay_verdict": result["verdict"],
+        "matched_rule": result["matched"],
+        "evaluated_rules": result["path"],
+        "inspection": inspection,
+        "limitations": limitations,
         "findings": findings,
         "side_effects": "none; read-only commands only, no firewall changes",
     }

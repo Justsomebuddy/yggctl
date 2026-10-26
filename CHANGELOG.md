@@ -2,13 +2,16 @@
 
 ## [Unreleased]
 
-- Add read-only `overlay-policy [interface]`: explains host policy that silently
-  rejects overlay traffic. It reports a TUN device outside every active firewalld
-  zone and a policies-drop `inet mullvad` output chain that accepts neither the
-  interface nor `200::/7` — both reproduced on a disposable host. Missing
-  `firewall-cmd`/`nft` are treated as absent, and no finding is invented without
-  a TUN interface. No zone, nft rule or interface is changed; a clear result is
-  not a reachability proof. See the
+- Add read-only `overlay-policy [interface]`: a static interpretation of the
+  effective `inet mullvad` output chain from `nft -j`, not a text match. Rules
+  are evaluated in order over an overlay sample address, so a source-only match,
+  a negated prefix, a port-constrained allow or an accept after a terminal reject
+  are reported as `conditional`/`denied`, never as general permission. The result
+  carries `overlay_verdict`, `matched_rule`, the evaluated path, per-command
+  `inspection` status (`ok`/`unavailable`/`invalid_json`) and explicit
+  `limitations`. A firewalld zone is reported as membership evidence, not
+  permission. No zone, nft rule or interface is changed and no packet is injected;
+  a clear result is not a reachability proof. See the
   [interaction contract](docs/UI_MAP.md#host-overlay-policy-diagnosis-unreleased-2026-10-24).
 
 
