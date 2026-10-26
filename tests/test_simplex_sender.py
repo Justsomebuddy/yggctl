@@ -574,6 +574,121 @@ os.kill(os.getpid(),9)
             self.assertEqual(list(pool.map(lambda _: self.call(), range(2))), [1, 1])
         self.assertEqual(len(self.calls), 1)
 
+    @logged
+    def test_operator_pause_defers_without_touching_queue_cursor_journal_or_cli(self):
+        self.queued()
+        pause = Path(self.cfg["lock"]).with_name("outbound.paused")
+        atomic(pause, "")
+        before = {
+            name: (self.p.state / name).read_bytes()
+            for name in ("alerts.jsonl", "alerts-forwarded.json")
+        }
+        with patch.object(sender, "lookup", side_effect=AssertionError("no native access")):
+            tm.forward(self.ctx)
+            with self.assertRaises(sender.OutboundPaused):
+                self.call()
+        self.assertFalse(self.calls)
+        self.assertFalse((self.p.state / "simplex-attempts.json").exists())
+        self.assertEqual(before, {name: (self.p.state / name).read_bytes() for name in before})
+        self.assertIn("state=paused deferred=1", self.output.getvalue())
+        self.assertIn("processed=0 errors=0 remaining=1", self.output.getvalue())
+        self.assertEqual(pause.read_bytes(), b"")
+
+    @logged
+    def test_pause_preserves_ambiguous_attempt_after_release_without_retry(self):
+        self.queued()
+        self.mode = "reject"
+        with self.assertRaisesRegex(Failure, "alert_forward_failed"):
+            tm.forward(self.ctx)
+        before = (self.p.state / "simplex-attempts.json").read_bytes()
+        pause = Path(self.cfg["lock"]).with_name("outbound.paused")
+        atomic(pause, "operator hold")
+        tm.forward(self.ctx)
+        self.assertEqual(before, (self.p.state / "simplex-attempts.json").read_bytes())
+        pause.unlink()  # Synthetic fixture release only; no production hold removed.
+        with self.assertRaisesRegex(Failure, "alert_forward_failed"):
+            tm.forward(self.ctx)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(before, (self.p.state / "simplex-attempts.json").read_bytes())
+        self.assertEqual(
+            json.loads((self.p.state / "alerts-forwarded.json").read_bytes()), {"sent": []}
+        )
+
+    @logged
+    def test_unsafe_pause_is_failure_not_successful_defer(self):
+        self.queued()
+        pause = Path(self.cfg["lock"]).with_name("outbound.paused")
+        for shape in ("directory", "link", "dangling", "mode", "owner"):
+            with self.subTest(shape=shape):
+                if shape == "directory":
+                    pause.mkdir()
+                elif shape in ("link", "dangling"):
+                    pause.symlink_to(self.database if shape == "link" else self.p.state / "absent")
+                else:
+                    atomic(pause, "", 0o640 if shape == "mode" else 0o600)
+                info = pause.lstat()
+                metadata = SimpleNamespace(
+                    st_mode=info.st_mode,
+                    st_uid=os.geteuid() + 1 if shape == "owner" else info.st_uid,
+                )
+                with patch.object(sender.Path, "lstat", return_value=metadata):
+                    with self.assertRaisesRegex(Failure, "simplex_pause_not_private"):
+                        sender.require_outbound_enabled(self.cfg)
+                with patch.object(
+                    sender,
+                    "require_outbound_enabled",
+                    side_effect=Failure("simplex_pause_not_private"),
+                ):
+                    with self.assertRaisesRegex(Failure, "alert_forward_failed"):
+                        tm.forward(self.ctx)
+                pause.rmdir() if shape == "directory" else pause.unlink()
+        self.assertFalse(self.calls)
+        self.assertNotIn("state=paused", self.output.getvalue())
+        self.assertFalse((self.p.state / "simplex-attempts.json").exists())
+
+    @logged
+    def test_pause_between_events_keeps_first_receipt_and_defers_rest(self):
+        self.queued()
+        tm.append(self.ctx, "alerts.jsonl", {"id": "later", "kind": "labelled-local-selftest"})
+        pause = Path(self.cfg["lock"]).with_name("outbound.paused")
+        native = self.ctx.runner
+
+        @logged
+        def accept_then_pause(argv, **kwargs):
+            result = native(argv, **kwargs)
+            atomic(pause, "")
+            return result
+
+        self.ctx.runner = accept_then_pause
+        tm.forward(self.ctx)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(
+            json.loads((self.p.state / "alerts-forwarded.json").read_bytes()), {"sent": ["event"]}
+        )
+        self.assertEqual(set(sender.load_journal(self.ctx)), {self.key()})
+        self.assertIn("processed=1 errors=0 remaining=1", self.output.getvalue())
+        self.assertIn("state=paused deferred=1", self.output.getvalue())
+
+    @logged
+    def test_pause_never_hides_an_earlier_native_failure(self):
+        self.queued()
+        tm.append(self.ctx, "alerts.jsonl", {"id": "later", "kind": "labelled-local-selftest"})
+        native = self.ctx.runner
+        self.mode = "reject"
+
+        @logged
+        def reject_then_pause(argv, **kwargs):
+            result = native(argv, **kwargs)
+            atomic(Path(self.cfg["lock"]).with_name("outbound.paused"), "")
+            return result
+
+        self.ctx.runner = reject_then_pause
+        with self.assertRaisesRegex(Failure, "alert_forward_failed:count=1"):
+            tm.forward(self.ctx)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(sender.load_journal(self.ctx)[self.key()]["status"], "attempted")
+        self.assertIn("state=paused deferred=2", self.output.getvalue())
+
 
 @logged
 def run_suite():

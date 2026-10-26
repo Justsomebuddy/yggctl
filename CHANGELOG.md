@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.12.4] - 2026-10-27
+
+- Honor a trusted `outbound.paused` sidecar beside the configured shared profile
+  lock before looking up or launching native handoff. Report explicit paused/
+  deferred state, retaining queue, cursors and ambiguous attempt evidence.
+  Unsafe markers and earlier failures still fail closed. Clearing an operator
+  hold never makes an old ambiguous attempt safe to retry automatically.
+
 ## [5.12.3] - 2026-10-27
 
 - Do not count skipped collections as confirmed peer downtime. With the nominal

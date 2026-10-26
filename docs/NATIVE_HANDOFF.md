@@ -33,6 +33,36 @@ lock, arms Linux parent-death SIGKILL after identity selection and checks its
 original parent before exec. The process runner kills/reaps its process group
 on timeout. This is Linux-specific, not a portable lifecycle guarantee.
 
+## Operator outbound pause (5.12.4)
+
+The native adapter bypasses the legacy shared shell sender, but must not bypass
+an operator's hold on the same profile. It checks `outbound.paused` in the parent
+directory of the configured `lock`, under that same profile lock, before any
+native lookup, attempt-journal write or CLI launch. No configuration fields or
+existing profile bindings change. This fixed sidecar name is part of integration:
+if a shared sender uses another pause path, align that external integration first.
+
+An existing marker must be a regular non-symlink file owned by the invoking
+privileged operator, with no group/other permissions. Contents are not interpreted.
+Unsafe markers or metadata errors fail closed; even a dangling symlink is unsafe.
+An absent marker preserves the native receipt protocol below. This is a sampled
+hold check, not atomic cancellation of a child already launched before the hold.
+All writers and the hold controller still require trusted custody/coordination.
+
+`alerts-forward` stops at the hold and prints `state=paused deferred=N`, with
+`remaining=N` retained and no receipt/cursor advance for deferred items. A purely
+paused run returns zero as an intentional deferral, **not delivery success**;
+monitor the state and remaining count, not just the service exit code. An earlier
+handoff failure in that same run still returns nonzero. A hold appearing between
+events preserves already committed receipts and defers the rest.
+
+This console never removes the marker. Only an explicit operator release of the
+hold, followed by `alerts-forward` or a new queue path activation, resumes work;
+there is no pause-file watcher or automatic resumption guarantee. Existing
+ambiguous attempts still require evidence/operator review after release and are
+never reset or retried merely because the marker disappeared. A pause does not
+cancel pending agent transports in a profile opened by another process.
+
 ## Durable protocol and failure semantics
 
 1. Under the profile lock, read native state query-only in one SQLite snapshot.
