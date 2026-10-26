@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.12.3] - 2026-10-27
+
+- Do not count skipped collections as confirmed peer downtime. With the nominal
+  one-minute cadence, a gap longer than two minutes restarts an unconfirmed down
+  interval; recovery of an already-alerted peer discloses the observation gap.
+  Keep pending alerts intact. Legacy tracked episodes without an observation
+  timestamp receive the same conservative treatment on their first new sample.
+
 ## [5.12.2] - 2026-10-25
 
 - Do not compare stored-history trends for a sanitized peer label that covers

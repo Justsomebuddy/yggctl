@@ -138,10 +138,16 @@ class TelemetryEdges(ConsoleFixture):
     def test_collect_degraded_health_and_repeat_dedup(self):
         tm.notify(self.ctx, "on")
         self.ps[0]["up"] = False
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=11)).isoformat()
+        now = dt.datetime.now(dt.timezone.utc)
+        since = (now - dt.timedelta(minutes=11)).isoformat()
         atomic(
             self.paths.state / "alert-state.json",
-            json.dumps({"down": {URI: {"since": since, "alerted": False}}}),
+            json.dumps(
+                {
+                    "down": {URI: {"since": since, "alerted": False}},
+                    "last_observed": (now - dt.timedelta(minutes=1)).isoformat(),
+                }
+            ),
         )
         with patch.object(self.ctx, "unit", return_value={"ActiveState": "inactive"}):
             for _ in range(2):

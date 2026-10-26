@@ -107,14 +107,19 @@ class PeerLabelAmbiguityTests(ConsoleFixture):
         self.direct(9, (FIRST, False), (SECOND, True))
         self.assertEqual(self.direct(20, (FIRST, False)), [])
         self.assertEqual(self.state()["down"][ENDPOINT]["since"], self.at(20))
+        for minute in range(21, 30):
+            self.assertEqual(self.direct(minute, (FIRST, False)), [])
         changes = self.direct(30, (FIRST, False))
         self.assertEqual([(x["kind"], x["minutes"]) for x in changes], [("ygg-peer-down", 10)])
 
     @logged
     def test_alerted_episode_survives_collision_and_restart_until_single_recovery(self):
         self.direct(0, (FIRST, False))
-        first = self.direct(11, (FIRST, False))
+        for minute in range(1, 10):
+            self.assertEqual(self.direct(minute, (FIRST, False)), [])
+        first = self.direct(10, (FIRST, False))
         self.assertEqual([x["kind"] for x in first], ["ygg-peer-down"])
+        self.assertEqual(self.direct(11, (FIRST, False)), [])
         before = self.state()
         self.assertEqual(self.direct(12, (FIRST, False), (SECOND, True)), [])
         middle = self.state()
@@ -148,8 +153,13 @@ class PeerLabelAmbiguityTests(ConsoleFixture):
     @logged
     def test_unrelated_single_peer_down_and_recovery_continue_through_collision(self):
         self.direct(0, (FIRST, True), (SECOND, False), (OTHER, False))
-        changes = self.direct(11, (SECOND, True), (FIRST, False), (OTHER, False))
+        for minute in range(1, 10):
+            self.assertEqual(
+                self.direct(minute, (FIRST, True), (SECOND, False), (OTHER, False)), []
+            )
+        changes = self.direct(10, (SECOND, True), (FIRST, False), (OTHER, False))
         self.assertEqual([(x["kind"], x["peer"]) for x in changes], [("ygg-peer-down", OTHER)])
+        self.assertEqual(self.direct(11, (SECOND, True), (FIRST, False), (OTHER, False)), [])
         changes = self.direct(12, (FIRST, False), (SECOND, True), (OTHER, True))
         self.assertEqual([(x["kind"], x["peer"]) for x in changes], [("ygg-peer-up", OTHER)])
         self.assertNotIn(ENDPOINT, self.state().get("down", {}))
@@ -172,6 +182,13 @@ class PeerLabelAmbiguityTests(ConsoleFixture):
     @logged
     def test_collect_ambiguous_label_does_not_block_unrelated_recovery(self):
         self.collect_at(0, [self.raw(FIRST, False), self.raw(SECOND, True), self.raw(OTHER, False)])
+        for minute in range(1, 10):
+            self.collect_at(
+                minute, [self.raw(FIRST, False), self.raw(SECOND, True), self.raw(OTHER, False)]
+            )
+        self.collect_at(
+            10, [self.raw(FIRST, False), self.raw(SECOND, True), self.raw(OTHER, False)]
+        )
         self.collect_at(
             11, [self.raw(FIRST, False), self.raw(SECOND, True), self.raw(OTHER, False)]
         )
@@ -288,6 +305,8 @@ class PeerLabelAmbiguityTests(ConsoleFixture):
     @logged
     def test_full_pending_and_real_queue_eio_do_not_invent_a_recovery(self):
         self.direct(0, (FIRST, False))
+        for minute in range(1, 11):
+            self.direct(minute, (FIRST, False))
         self.direct(11, (FIRST, False))
         pending = self.state()["pending"]
         append = tm.append
@@ -330,6 +349,8 @@ class PeerLabelAmbiguityTests(ConsoleFixture):
     @logged
     def test_ack_failure_then_restart_does_not_duplicate_pending_or_clear_tracking(self):
         self.direct(0, (FIRST, False))
+        for minute in range(1, 11):
+            self.direct(minute, (FIRST, False))
         self.direct(11, (FIRST, False))
         pending = self.state()["pending"]
         save = tm.save_peer_state

@@ -177,6 +177,8 @@ class HistorySender(unittest.TestCase):
         self.collect_at(0, Failure("fixture_history_write"))
         self.assertEqual(self.events(), [pending])
         self.assertEqual(tm.load_peer_state(self.ctx)["pending"], [])
+        for minute in range(1, 11):
+            self.collect_at(minute, OSError())
         self.collect_at(11, OSError())
         self.assertEqual(len(self.events()), 2)
         self.f.ps[0]["up"] = True

@@ -55,6 +55,7 @@ class OutboxReplayTests(ConsoleFixture):
             },
             "starts": {},
             "unstable": {},
+            "last_observed": (self.now - dt.timedelta(minutes=1)).isoformat(),
         }
         atomic(self.state_path, json.dumps(state))
         atomic(self.paths.state / "notify.state", "on\n")
