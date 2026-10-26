@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [5.12.3] - 2026-10-27
 
 - Do not count skipped collections as confirmed peer downtime. With the nominal
   one-minute cadence, a gap longer than two minutes restarts an unconfirmed down
