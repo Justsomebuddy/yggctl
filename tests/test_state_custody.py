@@ -122,10 +122,12 @@ class StateCustodyTests(ConsoleFixture):
                 "alerts.jsonl",
                 "metrics.jsonl",
                 "notify.state",
+                "privacy.json",
             },
         )
         self.assertEqual(leaves["alerts.jsonl"], {"mode": 0o640, "optional": True})
         self.assertEqual(leaves["alert-state.json"], {"mode": 0o600, "optional": True})
+        self.assertEqual(leaves["privacy.json"], {"mode": 0o600, "optional": True})
         self.assertNotIn("research", leaves)
         self.assertNotIn("atlas", leaves)
 

@@ -169,6 +169,46 @@ def save(ctx, values):
     return merged
 
 
+# Qualification carried by every result. A saved posture is a preference, not a
+# transport guarantee: no padding, mixing or cover traffic is implemented here.
+QUALIFICATION = {
+    "posture_only": True,
+    "transport_protection": "inactive",
+    "guarantee": "none",
+    "anonymity": "unknown",
+}
+
+
+@logged
+def arguments(values, low, high):
+    """Bound argument counts per subcommand instead of accepting extras."""
+    if not low <= len(values) <= high:
+        raise Failure(f"privacy_argument_count:{len(values)}")
+
+
+@logged
+def describe(stored):
+    """Persisted state plus what this module actually guarantees."""
+    return {
+        "enabled": stored["enabled"],
+        "profile": stored["profile"],
+        "log_private_flows": stored["log_private_flows"],
+        **QUALIFICATION,
+    }
+
+
+@logged
+def status(ctx):
+    return describe(load(ctx))
+
+
+@logged
+def disable(ctx):
+    values = load(ctx)
+    values["enabled"] = False
+    return describe(save(ctx, values))
+
+
 @logged
 def enable(ctx, name, participants, mbps, chunk, force=False):
     """Turn the posture on, unless the crowd or the cost says no."""
@@ -177,16 +217,31 @@ def enable(ctx, name, participants, mbps, chunk, force=False):
         raise Failure("privacy_off_cannot_be_enabled")
     gate = anonymity_gate(participants)
     cost = estimate(name, chunk, mbps, 0.0)
-    verdict = {
-        "enabled": True,
-        "profile": name,
-        "gate": gate,
-        "cost": {key: cost[key] for key in ("overhead_pct", "cover_kbps", "fits_budget")},
-    }
-    if not force and (not gate["allowed"] or not cost["fits_budget"]):
-        verdict["refused"] = True
-        verdict["hint"] = "pass --force only after reviewing the cost"
-        return verdict
+    requested = {"profile": name, "participants": participants}
+    blocked = []
+    if not gate["allowed"]:
+        blocked.append("anonymity_set_too_small")
+    if not cost["fits_budget"]:
+        blocked.append("overhead_over_profile_budget")
+    if blocked and not force:
+        return {
+            "requested": requested,
+            "persisted": describe(load(ctx)),
+            "gate": gate,
+            "cost": cost,
+            "refused": True,
+            "forced": False,
+            "guard_overridden": [],
+            "hint": "pass --force only after reviewing the cost",
+        }
     values = load(ctx)
     values.update({"enabled": True, "profile": name})
-    return {**save(ctx, values), "gate": gate}
+    return {
+        "requested": requested,
+        "persisted": describe(save(ctx, values)),
+        "gate": gate,
+        "cost": cost,
+        "refused": False,
+        "forced": bool(force and blocked),
+        "guard_overridden": blocked if force else [],
+    }

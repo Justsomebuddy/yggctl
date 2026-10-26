@@ -183,6 +183,7 @@ def state_custody(ctx):
         ("alerts.jsonl", 0o640),
         ("metrics.jsonl", 0o640),
         ("notify.state", 0o644),
+        ("privacy.json", 0o600),
     ):
         state_member(root / name, mode=mode, optional=True)
     event("state", "state_custody", "existing_permissions_accepted_no_repair")

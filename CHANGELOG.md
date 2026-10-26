@@ -6,9 +6,16 @@
   file that is disabled by default. `estimate` reports padding overhead, mixing
   delay median/p95 and cover bitrate for a measured path; `on` refuses a posture
   whose observed crowd is below the anonymity-set minimum or whose padding
-  exceeds the profile budget, unless `--force` is passed. Enabling privacy while
-  logging private flows remains impossible. This is posture management only: no
-  packet padding, no daemon change, no network request. See the
+  exceeds the profile budget, unless `--force` is passed. Every result separates
+  the `requested` posture from the `persisted` one, always carries the cost, and
+  reports `transport_protection: inactive`, `guarantee: none` and
+  `anonymity: unknown`, so a saved preference cannot be read as an anonymity
+  claim. `--force` returns `forced` and the exact `guard_overridden` reasons.
+  Mutations use the serialized custody-checked lock and `privacy.json` joins the
+  privileged state inventory (0600, no symlink, no extra link, no ACL); argument
+  counts are bounded per subcommand. Enabling privacy while logging private
+  flows remains impossible. This is posture management only: no packet padding,
+  no daemon change, no network request. See the
   [interaction contract](docs/UI_MAP.md#opt-in-privacy-posture-unreleased-2026-10-24).
 
 

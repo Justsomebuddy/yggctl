@@ -54,6 +54,7 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
               mode direct|tunnel [--apply], recover-transaction [--apply],
               privacy status|off|estimate ПРОФИЛЬ|on ПРОФИЛЬ [участники] [Мбит/с] [чанк] [--force]
               — приватность выключена по умолчанию; оценка цены и порог anonymity set.
+              on/off меняют состояние (нужен root) и держат общий лок; это поза, а не защита транспорта.
               Без --apply изменение только показывается.
 Восстановление: snapshot, diff [файл], backup [--full --recipient ОТПЕЧАТОК], restore ФАЙЛ (только просмотр; --apply отключён), doctor
 Исследования: research capture|map [ID]|diff [ранний ID]|report [1..72 часа] — снимки своей ноды
@@ -369,20 +370,24 @@ def do_peer(ctx, args, a):
 @logged
 def do_privacy(ctx, args, a):
     # Posture only: no packet handling, no daemon change, no network request.
+    # Mutations use the serialized, custody-checked boundary like every other
+    # privileged state write; argument counts are bounded per subcommand.
     if not a:
         raise Failure("privacy_action_required")
     action = a[0]
     if action == "status":
-        output(privacy.load(ctx))
+        privacy.arguments(a, 1, 1)
+        output(privacy.status(ctx))
         return
     if action == "off":
-        values = privacy.load(ctx)
-        values["enabled"] = False
-        output(privacy.save(ctx, values))
+        privacy.arguments(a, 1, 1)
+        with ctx.locked():
+            output(privacy.disable(ctx))
         return
     if action == "estimate":
         if len(a) < 2:
             raise Failure("privacy_profile_required")
+        privacy.arguments(a, 2, 5)
         chunk = bounded_number(a[2], 1, 1 << 20) if len(a) > 2 else 1280
         mbps = bounded_number(a[3], 0, 100000) if len(a) > 3 else 87
         rtt = bounded_number(a[4], 0, 60000) if len(a) > 4 else 56
@@ -391,12 +396,14 @@ def do_privacy(ctx, args, a):
     if action == "on":
         if len(a) < 2:
             raise Failure("privacy_profile_required")
+        privacy.arguments(a, 2, 5)
         participants = bounded_number(a[2], 0, 1000000) if len(a) > 2 else 0
         mbps = bounded_number(a[3], 0, 100000) if len(a) > 3 else 87
         chunk = bounded_number(a[4], 1, 1 << 20) if len(a) > 4 else 1280
-        result = privacy.enable(ctx, a[1], participants, mbps, chunk, args.force)
+        with ctx.locked():
+            result = privacy.enable(ctx, a[1], participants, mbps, chunk, args.force)
         output(result)
-        if result.get("refused"):
+        if result["refused"]:
             raise Failure("privacy_refused")
         return
     raise Failure("unknown_privacy_action")
