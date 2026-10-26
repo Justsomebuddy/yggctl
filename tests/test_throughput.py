@@ -45,7 +45,7 @@ class Throughput(ConsoleFixture):
                 sample(2, rx=7_500_000, tx=15_000_000),
             ]
         )
-        self.assertIn("peers=1 invalid_counters=0", text)
+        self.assertIn("peers=1 ambiguous_labels=0 invalid_counters=0", text)
         self.assertIn(
             "sent=1.00Mbit/s peak=1.00 recv=0.50Mbit/s peak=0.50 intervals=2 gaps=0 resets=0",
             text,
@@ -79,7 +79,7 @@ class Throughput(ConsoleFixture):
                 sample(4, rx=0, tx=0),
             ]
         )
-        self.assertIn("peers=1 invalid_counters=5", text)
+        self.assertIn("peers=1 ambiguous_labels=0 invalid_counters=5", text)
         self.assertIn("intervals=1 gaps=0 resets=0", text)
 
     def test_rows_without_usable_peer_counters_are_reported(self):
@@ -89,7 +89,7 @@ class Throughput(ConsoleFixture):
             {"ts": (BASE + dt.timedelta(minutes=2)).isoformat(), "peers": [1, None]},
         ]
         text = self.run_throughput(rows)
-        self.assertIn("peers=0 invalid_counters=0", text)
+        self.assertIn("peers=0 ambiguous_labels=0 invalid_counters=0", text)
         self.assertIn("no_peer_counters: stored samples carry no usable peer counters", text)
 
     def test_empty_window_is_a_controlled_failure(self):
@@ -114,3 +114,107 @@ class Throughput(ConsoleFixture):
             main.do_throughput(self.ctx, argparse.Namespace(command="throughput"), ["2"])
         root.assert_called_once_with()
         throughput.assert_called_once_with(self.ctx, 2)
+
+
+WS = "ws://192.0.2.1:443"
+
+
+def row(minutes: float, peers: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "ts": (BASE + dt.timedelta(minutes=minutes)).isoformat(),
+        "up": 1,
+        "peers": peers,
+    }
+
+
+def link(path: str, rx: Any = 0, tx: Any = 0) -> dict[str, Any]:
+    return {"r": WS + path, "up": True, "rx": rx, "tx": tx}
+
+
+class ThroughputSeries(Throughput):
+    def test_two_ws_paths_at_one_endpoint_are_ambiguous(self):
+        text = self.run_throughput(
+            [
+                row(0, [link("/a")]),
+                row(1, [link("/b", rx=1000, tx=1000)]),
+            ]
+        )
+        self.assertIn("peers=0 ambiguous_labels=1", text)
+        self.assertIn("ws://192.0.2.1:443: ambiguous_peer_label series=2", text)
+        self.assertNotIn("Mbit/s", text)
+
+    def test_duplicate_rows_with_the_same_identity_stay_one_series(self):
+        text = self.run_throughput(
+            [
+                row(0, [link("/a"), link("/a")]),
+                row(1, [link("/a", rx=7_500_000, tx=7_500_000)]),
+            ]
+        )
+        self.assertIn("peers=1 ambiguous_labels=0", text)
+        self.assertIn("sent=1.00Mbit/s", text)
+
+    def test_counter_above_the_exact_float_range_is_unusable(self):
+        text = self.run_throughput([sample(0), sample(1, rx=(1 << 53) + 1, tx=(1 << 53) + 1)])
+        self.assertIn("invalid_counters=2", text)
+        self.assertIn("no_usable_intervals", text)
+
+    def test_counter_at_the_exact_float_bound_is_accepted(self):
+        text = self.run_throughput(
+            [
+                sample(0, rx=(1 << 53) - 1, tx=(1 << 53) - 1),
+                sample(1, rx=1 << 53, tx=1 << 53),
+            ]
+        )
+        self.assertIn("intervals=1", text)
+
+    def test_overflowing_counters_never_print_inf(self):
+        text = self.run_throughput([sample(0), sample(1, rx=1e308, tx=1e308)])
+        self.assertIn("invalid_counters=2", text)
+        self.assertNotRegex(text.lower(), r"\binf\b|\bnan\b")
+
+    def test_rate_above_the_usable_domain_is_an_unusable_interval(self):
+        text = self.run_throughput([sample(0), sample(1 / 60, rx=10**15, tx=10**15)])
+        self.assertIn("no_usable_intervals gaps=0 resets=0 unusable=1", text)
+        self.assertNotRegex(text.lower(), r"\binf\b|\bnan\b")
+
+    def test_unparsable_peer_identity_is_counted_and_skipped(self):
+        text = self.run_throughput(
+            [
+                row(0, [{"r": None, "rx": 0, "tx": 0}, {"r": "not-a-uri", "rx": 0, "tx": 0}]),
+                row(1, [{"r": URI, "rx": 10, "tx": 10}]),
+            ]
+        )
+        self.assertIn("invalid_identities=2", text)
+        self.assertIn("peers=1", text)
+
+    def test_rate_helper_rejects_out_of_domain_values(self):
+        self.assertIsNone(tm.throughput_rate(1, 0))
+        self.assertIsNone(tm.throughput_rate(-1, 1))
+        self.assertIsNone(tm.throughput_rate(10**400, 1))
+        self.assertIsNone(tm.throughput_rate(10**15, 1))
+        self.assertEqual(tm.throughput_rate(1_000_000, 8), 1.0)
+
+    def test_series_key_keeps_the_public_pin_and_drops_credentials(self):
+        pin = "a" * 64
+        self.assertEqual(
+            tm.peer_series_key(f"ws://user:secret@192.0.2.1:443/a?key={pin.upper()}&password=x"),
+            f"ws://192.0.2.1:443/a#{pin}",
+        )
+        self.assertEqual(tm.peer_series_key("tcp://192.0.2.1:443/"), "tcp://192.0.2.1:443#")
+        for value in (
+            None,
+            7,
+            "http://192.0.2.1:443",
+            "tcp://192.0.2.1",
+            "tcp://example.test:443",
+            "tcp://fe80::1%25eth0:443",
+            "tcp://[fe80::1%25eth0]:443",
+            "tcp://192.0.2.1:443\n",
+            "tcp://192.0.2.1:443/" + "a" * 4096,
+        ):
+            self.assertIsNone(tm.peer_series_key(value), value)
+        self.assertEqual(
+            tm.peer_series_key("tcp://192.0.2.1:443?key=" + "z" * 64),
+            "tcp://192.0.2.1:443#",
+        )
+        self.assertEqual(tm.peer_series_key("tcp://192.0.2.1:443?bad"), "tcp://192.0.2.1:443#")

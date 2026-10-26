@@ -3,9 +3,16 @@
 ## [Unreleased]
 
 - Add read-only `throughput [hours]` (default 24, integer 1..72) over the stored
-  metrics window: per sanitized peer label it reports mean and peak observed
-  send/receive rates from adjacent `rx`/`tx` counter deltas, plus counted
-  intervals, gaps and resets.
+  metrics window: per peer series it reports mean and peak observed send/receive
+  rates from adjacent `rx`/`tx` counter deltas, plus counted intervals, gaps,
+  resets and unusable intervals. Grouping uses a credential-free series identity
+  (endpoint, WebSocket path and the public `key` pin), not the display label, so
+  two links that render to one label are reported as `ambiguous_peer_label`
+  instead of being fused into a guessed rate. Counters must stay inside the
+  exactly representable float range (2**53) and every derived rate must be
+  finite and below the documented 1 Tbit/s domain bound; otherwise the interval
+  is unusable and nothing is printed as `inf`/`nan`. Still no API request, file
+  write, schema change or gate change.
 
 ## [5.12.2] - 2026-10-25
 
