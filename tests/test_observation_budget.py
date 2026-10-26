@@ -93,6 +93,8 @@ class ObservationBudget(unittest.TestCase):
             tm.load_peer_state(self.ctx)["down"][URI]["since"],
             (self.zero + dt.timedelta(minutes=11)).isoformat(),
         )
+        for minute in range(12, 21):
+            self.collect_at(minute)
         self.collect_at(21)
         self.assertEqual([a["kind"] for a in self.peer_events()], ["ygg-peer-down"])
         self.assertEqual(self.peer_events()[0]["minutes"], 10)
@@ -100,6 +102,8 @@ class ObservationBudget(unittest.TestCase):
     @logged
     def test_alerted_episode_survives_gap_without_duplicate_and_recovery_is_uncertain(self):
         self.collect_at(0)
+        for minute in range(1, 11):
+            self.collect_at(minute)
         self.collect_at(11)
         first = self.peer_events()[0]
         self.collect_at(12, ConnectionResetError())
@@ -151,7 +155,9 @@ class ObservationBudget(unittest.TestCase):
     @logged
     def test_confirmed_empty_and_stack_only_failure_are_not_unknown_node(self):
         self.collect_at(0)
-        sample = self.collect_at(11, OSError(), stack_only=True)
+        for minute in range(1, 10):
+            self.collect_at(minute)
+        sample = self.collect_at(10, OSError(), stack_only=True)
         self.assertTrue(sample["peers_observed"])
         self.assertEqual([a["kind"] for a in self.peer_events()], ["ygg-peer-down"])
         self.fixture.ps = []

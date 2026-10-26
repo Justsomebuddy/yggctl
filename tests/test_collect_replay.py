@@ -54,14 +54,16 @@ class CollectReplayTests(ConsoleFixture):
     @logged
     def pending_down(self):
         self.collect_at(0)
+        for minute in range(1, 10):
+            self.collect_at(minute)
         with self.assertRaises(OSError):
-            self.collect_at(11, queue_error=OSError(errno.EIO, "synthetic queue failure"))
+            self.collect_at(10, queue_error=OSError(errno.EIO, "synthetic queue failure"))
         return tm.load_peer_state(self.ctx)["pending"]
 
     @logged
     def test_queue_failure_preserves_two_observed_episodes(self):
         first = self.pending_down()
-        for minute, up in ((15, True), (20, False), (31, False)):
+        for minute, up in ((15, True), (20, False), *[(minute, False) for minute in range(21, 31)]):
             with self.assertRaises(OSError):
                 self.collect_at(minute, up, OSError(errno.EIO, "synthetic queue failure"))
         pending = tm.load_peer_state(self.ctx)["pending"]
@@ -79,7 +81,7 @@ class CollectReplayTests(ConsoleFixture):
             [p["kind"] for p in events],
             ["ygg-peer-down", "ygg-peer-up", "ygg-peer-down", "ygg-peer-up"],
         )
-        self.assertEqual([p["minutes"] for p in events], [11, 15, 11, 12])
+        self.assertEqual([p["minutes"] for p in events], [10, 15, 10, 12])
         self.assertEqual(tm.load_peer_state(self.ctx)["pending"], [])
 
     @logged

@@ -74,6 +74,18 @@ This covers producer-side queue recovery. Queue retention, consumer wakeups,
 external sender behavior and human acknowledgement are separate contracts;
 exactly-once delivery is not promised.
 
+Peer state also records `last_observed` atomically with each observed transition.
+The nominal collector cadence is one minute: intervals up to 120 seconds tolerate
+scheduling jitter, while longer intervals or a regressed clock break confirmation
+of continuous downtime. An explicit unknown sample retains that timestamp and
+marks a gap as before. Pending events retain their original IDs and payloads.
+Tracked legacy episodes with no timestamp are treated as uncertain once on the
+first new observation; invalid/naive timestamps also cannot establish continuity.
+Unalerted episodes restart confirmation, while already-alerted episodes survive
+without a duplicate down alert and disclose uncertainty on recovery. This is a
+sampling policy, not proof of connectivity between samples or detection of every
+missed timer firing. Installed schedules must match the stated cadence.
+
 ### Source 5.10.0: composed producer and retention behavior
 
 An initial pending replay still runs before staging new transitions. If replay

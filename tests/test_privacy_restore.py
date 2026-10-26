@@ -103,8 +103,8 @@ class PrivacyRestore(ConsoleFixture):
             dict(self.ps[0], remote=URI.replace("192.0.2.1", "192.0.2.2")),
         ]
         atomic(self.paths.state / "notify.state", "on\n")
-        for minute, up in ((0, False), (11, False), (12, True)):
-            self.ps[0]["up"] = up
+        for minute in range(13):
+            self.ps[0]["up"] = minute == 12
             at = (now + dt.timedelta(minutes=minute)).isoformat()
             with patch.object(tm, "timestamp", return_value=at):
                 sample = tm.collect(self.ctx)

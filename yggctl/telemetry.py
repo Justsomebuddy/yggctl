@@ -295,6 +295,9 @@ def notify(ctx, action):
 
 
 PEER_DOWN_MINUTES = 10
+# The collector's nominal cadence is one minute. Tolerate scheduling jitter,
+# but do not extend a peer episode across more than two minutes without a sample.
+PEER_OBSERVATION_MAX_GAP_SECONDS = 120
 UNSTABLE_RECONNECTS = 3  # reconnects within the last hour that make a peer "unstable"
 UNSTABLE_REPEAT_HOURS = 6  # at most one "unstable" alert per peer in this time
 PEER_STATE_LIMIT = 1 << 20
@@ -464,11 +467,28 @@ def stage_health_alert(ctx, sample):
 
 
 @logged
+def peer_observation_gap(state, now):
+    """Missing, invalid or regressed observation time cannot confirm continuity."""
+    previous = state.get("last_observed")
+    if previous is None:
+        # One conservative transition when upgrading already-tracked episodes.
+        return bool(state.get("down"))
+    try:
+        observed = dt.datetime.fromisoformat(previous)
+        if observed.tzinfo is None:
+            return True
+        elapsed = (now - observed).total_seconds()
+    except (TypeError, ValueError):
+        return True
+    return elapsed < 0 or elapsed > PEER_OBSERVATION_MAX_GAP_SECONDS
+
+
+@logged
 def stage_peer_alerts(ctx, sample, uptimes=None):
     """Changes worth an alert: a peer down for PEER_DOWN_MINUTES, its recovery, and a peer
     that reconnected UNSTABLE_RECONNECTS times within an hour (from the node's per-peer
     uptime, which also catches drops shorter than the sampling interval). State lives in
-    alert-state.json and is rewritten only when something changes. The caller holds
+    alert-state.json, including the latest observed sample time. The caller holds
     ctx.locked(). When notifications are enabled, events and transitions are saved
     together in that one atomic file, before anything is appended to the queue."""
     state = load_peer_state(ctx)
@@ -481,11 +501,11 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
             save_peer_state(ctx, state)
         event("state", "peer_observation", "unknown_tracking_retained")
         return []
-    gap = bool(state.get("observation_gap"))
+    now = dt.datetime.fromisoformat(sample["ts"])
+    gap = bool(state.get("observation_gap")) or peer_observation_gap(state, now)
     down = state.get("down", {}) if isinstance(state.get("down"), dict) else {}
     starts = state.get("starts", {}) if isinstance(state.get("starts"), dict) else {}
     unstable = state.get("unstable", {}) if isinstance(state.get("unstable"), dict) else {}
-    now = dt.datetime.fromisoformat(sample["ts"])
     peers = [
         dict(p, r=peer_label(p["r"]))
         for p in sample.get("peers", [])
@@ -564,6 +584,7 @@ def stage_peer_alerts(ctx, sample, uptimes=None):
             {"ts": sample["ts"], "id": secrets.token_hex(16), **change} for change in changes
         ]
     new_state = {
+        "last_observed": sample["ts"],
         "down": tracked,
         "starts": new_starts,
         "unstable": new_unstable,

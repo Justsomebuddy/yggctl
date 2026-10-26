@@ -1462,18 +1462,22 @@ class ConsoleTests(ConsoleFixture):
             }
 
         self.assertEqual(telemetry.peer_alerts(self.ctx, sample(0, False)), [])
-        self.assertEqual(telemetry.peer_alerts(self.ctx, sample(5, False)), [])
+        for minute in range(1, 10):
+            self.assertEqual(telemetry.peer_alerts(self.ctx, sample(minute, False)), [])
         state = self.paths.state / "alert-state.json"
-        inode = state.stat().st_ino
+        previous = state.read_bytes()
         down = telemetry.peer_alerts(self.ctx, sample(10, False))
         self.assertEqual(
             down, [{"kind": "ygg-peer-down", "peer": URI, "minutes": 10, "up": 1, "total": 2}]
         )
         self.assertEqual(telemetry.peer_alerts(self.ctx, sample(11, False)), [])
-        self.assertNotEqual(state.stat().st_ino, inode)
-        inode = state.stat().st_ino
+        self.assertNotEqual(state.read_bytes(), previous)
+        previous = state.read_bytes()
         self.assertEqual(telemetry.peer_alerts(self.ctx, sample(12, False)), [])
-        self.assertEqual(state.stat().st_ino, inode)
+        self.assertNotEqual(state.read_bytes(), previous)
+        self.assertEqual(json.loads(state.read_text())["last_observed"], sample(12, False)["ts"])
+        for minute in range(13, 20):
+            self.assertEqual(telemetry.peer_alerts(self.ctx, sample(minute, False)), [])
         up = telemetry.peer_alerts(self.ctx, sample(20, True))
         self.assertEqual(
             up, [{"kind": "ygg-peer-up", "peer": URI, "minutes": 20, "up": 2, "total": 2}]

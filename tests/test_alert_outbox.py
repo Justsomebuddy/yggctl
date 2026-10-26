@@ -35,12 +35,13 @@ class AlertOutboxTests(ConsoleFixture):
             }
             for n in (1, 2, 3)
         ]
-        self.initial = {
+        self.initial: dict[str, Any] = {
             "down": {
                 URI: {"since": (self.now - dt.timedelta(minutes=11)).isoformat(), "alerted": False}
             },
             "starts": {},
             "unstable": {},
+            "last_observed": (self.now - dt.timedelta(minutes=1)).isoformat(),
         }
         atomic(self.state_path, json.dumps(self.initial))
         atomic(self.paths.state / "notify.state", "on\n", 0o644)
@@ -113,7 +114,12 @@ class AlertOutboxTests(ConsoleFixture):
     @logged
     def test_partial_batch_replay_preserves_ids_and_order(self):
         sample: dict[str, Any] = {"ts": self.now.isoformat(), "peers": []}
-        state: dict[str, Any] = {"down": {}, "starts": {}, "unstable": {}}
+        state: dict[str, Any] = {
+            "down": {},
+            "starts": {},
+            "unstable": {},
+            "last_observed": self.initial["last_observed"],
+        }
         for n in (1, 2, 3):
             uri = URI.replace("192.0.2.1", f"192.0.2.{n}")
             state["down"][uri] = self.initial["down"][URI]
