@@ -13,6 +13,22 @@ class UnderlayServiceGeneration(ConsoleFixture):
         self.assertEqual(checks.underlay(self.ctx)["own_connections"], [1, 1])
 
     @logged
+    def test_unavailable_final_service_read_does_not_confirm_proof(self):
+        original = self.ctx.unit
+        calls = []
+
+        @logged
+        def unit(name):
+            calls.append(name)
+            if len(calls) == 3:
+                raise Failure("external_unavailable:systemctl")
+            return original(name)
+
+        with patch.object(self.ctx, "unit", side_effect=unit):
+            with self.assertRaisesRegex(Failure, "^external_unavailable:systemctl$"):
+                checks.underlay(self.ctx)
+
+    @logged
     def test_service_replaced_or_stopped_during_proof_is_rejected(self):
         original = self.ctx.unit
         for changed_unit in (NODE, STACK):

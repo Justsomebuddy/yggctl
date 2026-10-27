@@ -376,15 +376,20 @@ def quic_socket_proof(ctx, pids, socket_lines, conn_lines, mode):
 
 
 @logged
+def verify_underlay_exclusions(ctx, pids, mode):
+    split_list = ctx.run(["/usr/bin/mullvad", "split-tunnel", "list"]).stdout.decode()
+    exclusions = set(re.findall(r"(?m)^\s*(\d+)\s*$", split_list))
+    if any((str(p) in exclusions) != (mode == "direct") for p in pids):
+        raise Failure("underlay_pid_exclusion_mismatch")
+
+
+@logged
 def underlay(ctx):
     mode = ctx.mode()
     pids = [int(ctx.unit(u).get("MainPID", "0")) for u in (NODE, STACK)]
     if not all(p > 0 for p in pids):
         raise Failure("missing_runtime_pid")
-    split_list = ctx.run(["/usr/bin/mullvad", "split-tunnel", "list"]).stdout.decode()
-    exclusions = set(re.findall(r"(?m)^\s*(\d+)\s*$", split_list))
-    if any((str(p) in exclusions) != (mode == "direct") for p in pids):
-        raise Failure("underlay_pid_exclusion_mismatch")
+    verify_underlay_exclusions(ctx, pids, mode)
     # Bind conntrack evidence to the local/remote four-tuple of each own socket.
     sockets = ctx.run(["/usr/bin/ss", "-H", "-antup"]).stdout.decode().splitlines()
     conn = ctx.run(["/usr/sbin/conntrack", "-L"]).stdout.decode().splitlines()
@@ -416,6 +421,9 @@ def underlay(ctx):
     # mixed snapshot as proof for the new process.
     if pids != [int(ctx.unit(u).get("MainPID", "0")) for u in (NODE, STACK)]:
         raise Failure("underlay_service_pid_changed")
+    # The operator or VPN service can also change exclusions while the socket
+    # snapshot is being gathered. Recheck the two relevant processes.
+    verify_underlay_exclusions(ctx, pids, mode)
     return {"mode": mode, "own_connections": list(proof.values())}
 
 

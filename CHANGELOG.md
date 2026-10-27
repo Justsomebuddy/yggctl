@@ -4,6 +4,8 @@
 
 - Refuse underlay proof if either service PID changes during observation. This
   prevents old socket and conntrack evidence from certifying a restarted service.
+- Recheck both service exclusions before accepting underlay proof, so a split
+  change during observation does not make the earlier list look current.
 
 ## [5.12.4] - 2026-10-27
 
