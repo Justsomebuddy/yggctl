@@ -1,3 +1,9 @@
+> Source **5.13.0** adds read-only `throughput [hours]` (default24,1..72).
+> It rates only adjacent unambiguous stored observations, breaks at missing or
+> invalid samples, and visibly qualifies role-writable history. This is passive
+> observed counter traffic, not capacity or authenticated history.
+> See [qualification and limits](docs/RELEASE-5.13.0.md).
+
 > Source **5.12.5** rejects stale underlay evidence when either service PID or
 > its split-tunnel exclusion changes during the check. Rollback and explicit
 > recovery still need a fresh restored-mode proof. This remains a sampled,

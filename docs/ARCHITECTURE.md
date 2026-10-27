@@ -223,3 +223,13 @@ unchanged 1000-event pending limit reproduces a transient health intent refused
 before recovery. API observations, time and sender are controlled fixtures;
 this is not qualification of a particular installation or a full single-volume
 disk failure. The persistent warning does not reconstruct that missing intent.
+
+## Stored-history throughput (5.13.0)
+
+`throughput` uses the existing bounded metrics reader only. Track points retain
+sample positions; missing members cannot be silently removed before pairing.
+Counter resets/gaps/non-finite or out-of-domain values are not clamped or filled.
+Duplicate timestamps and conflicting rows are barriers. Ambiguous display labels
+are withheld across the window, including identities with invalid counters.
+A discarded record with unknown position prevents proving any adjacency, so all
+rates are withheld. Generated text constructs its own role-writable provenance.

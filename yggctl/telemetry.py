@@ -2,13 +2,16 @@
 
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import math
 import os
+import re
 import secrets
 import stat
 import statistics
 import time
+import urllib.parse
 from collections import Counter
 from typing import Any
 
@@ -22,6 +25,7 @@ from core import (
     timestamp,
     event,
     public_peer_uri,
+    PUBLIC_PEER_SCHEMES,
     METRIC_RETENTION,
     METRICS_LIMIT,
 )
@@ -1489,3 +1493,242 @@ def watch(ctx, count=5, interval=2):
     print(f"processed={count} errors={errors} elapsed={time.monotonic() - start:.1f}s")
     if errors:
         raise Failure(f"watch_samples_failed:count={errors}")
+
+
+# Stored-history throughput: observed counter deltas, never link capacity.
+# A gap larger than this is not a rate: the collector cadence is minutes, so a
+# quarter-hour hole would otherwise report a meaningless long-window average.
+THROUGHPUT_MAX_GAP = 600.0
+# float64 stores every integer exactly only up to 2**53. A larger counter cannot
+# be compared without a rounding artefact, so it is an unusable observation
+# rather than a huge rate.
+THROUGHPUT_MAX_COUNTER = 1 << 53
+# Deliberate bound on the derived domain: 1 Tbit/s is above any consumer link we
+# can observe, so anything above it is an unusable interval, never printed.
+THROUGHPUT_MAX_RATE_MBPS = 1_000_000.0
+
+
+@logged
+def peer_series_key(value):
+    """Credential-free identity of one peer series, or None when unusable.
+
+    `peer_label()` is a display boundary and drops the WebSocket path, so two
+    different links at one endpoint share a label. Grouping needs the canonical
+    endpoint plus the path and the public key pin; credentials are never kept.
+    """
+    if not isinstance(value, str) or len(value) > 4096 or re.search(r"[\s\x00-\x1f]", value):
+        return None
+    try:
+        uri = urllib.parse.urlsplit(value)
+        hostname = uri.hostname or ""
+        if "%" in hostname:
+            return None
+        host = ipaddress.ip_address(hostname)
+        port = uri.port
+    except ValueError:
+        return None
+    if uri.scheme not in PUBLIC_PEER_SCHEMES or not port:
+        return None
+    authority = f"[{host}]" if host.version == 6 else str(host)
+    pin = ""
+    try:
+        options = urllib.parse.parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        options = []
+    for name, option in options:
+        if name == "key" and re.fullmatch(r"[0-9a-fA-F]{64}", option):
+            pin = option.lower()
+            break
+    path = uri.path if uri.path not in ("", "/") else ""
+    return f"{uri.scheme}://{authority}:{port}{path}#{pin}"
+
+
+@logged
+def throughput_counter(value, audit):
+    """Counter inside the exactly-representable domain, or None.
+
+    An int larger than 2**53 cannot survive a float conversion without a
+    rounding artefact, so the bound is applied to the raw value before any
+    arithmetic.
+    """
+    audit["checked"] += 1
+    if type(value) is int:
+        valid = 0 <= value <= THROUGHPUT_MAX_COUNTER
+    elif type(value) is float:
+        valid = math.isfinite(value) and 0 <= value <= THROUGHPUT_MAX_COUNTER
+    else:
+        valid = False
+    if not valid:
+        audit["invalid"] += 1
+        return None
+    return value
+
+
+@logged
+def throughput_rate(delta_bytes, seconds):
+    """Finite Mbit/s inside the usable domain, or None; never inf/nan."""
+    if seconds <= 0 or delta_bytes < 0:
+        return None
+    try:
+        rate = delta_bytes * 8 / seconds / 1e6
+    except OverflowError:
+        return None
+    if not math.isfinite(rate) or rate > THROUGHPUT_MAX_RATE_MBPS:
+        return None
+    return rate
+
+
+@logged
+def throughput_track(points):
+    """Adjacent-sample byte deltas for one peer series.
+
+    Counters are monotonic in the collector, so a decrease is a reset and the
+    interval is skipped, never clamped. Only positive intervals no larger than
+    THROUGHPUT_MAX_GAP with a finite in-domain rate contribute; nothing is
+    extrapolated.
+    """
+    intervals = gaps = resets = unusable = 0
+    seconds = sent = recv = 0.0
+    peak_out = peak_in = 0.0
+    previous = None
+    for position, at, rx, tx in points:
+        if rx is None or tx is None:
+            previous = None
+            unusable += 1
+            continue
+        if previous is None:
+            previous = (position, at, rx, tx)
+            continue
+        previous_position, previous_at, previous_rx, previous_tx = previous
+        previous = (position, at, rx, tx)
+        elapsed = (at - previous_at).total_seconds()
+        if position != previous_position + 1:
+            gaps += 1
+            continue
+        if elapsed <= 0:
+            continue
+        delta_out = tx - previous_tx
+        delta_in = rx - previous_rx
+        if delta_out < 0 or delta_in < 0:
+            resets += 1
+            continue
+        if elapsed > THROUGHPUT_MAX_GAP:
+            gaps += 1
+            continue
+        out_rate = throughput_rate(delta_out, elapsed)
+        in_rate = throughput_rate(delta_in, elapsed)
+        if out_rate is None or in_rate is None:
+            unusable += 1
+            continue
+        intervals += 1
+        seconds += elapsed
+        sent += delta_out
+        recv += delta_in
+        peak_out = max(peak_out, out_rate)
+        peak_in = max(peak_in, in_rate)
+    return {
+        "intervals": intervals,
+        "gaps": gaps,
+        "resets": resets,
+        "unusable": unusable,
+        "seconds": seconds,
+        "bytes_out": sent,
+        "bytes_in": recv,
+        "peak_out": peak_out,
+        "peak_in": peak_in,
+    }
+
+
+@logged
+def throughput(ctx, hours=24):
+    """Per-peer observed send/receive rates from stored samples.
+
+    This is a bounded, read-only projection of peer counter deltas. It is not
+    link capacity, not application goodput and not a probe of remote peers.
+    Invalid counters/timestamps and conflicting duplicates are explicit breaks,
+    not zero-filled or removed before pairing. Missing peers break adjacency.
+    Unassignable identities invalidate that sample; unreadable history records
+    with unknown positions withhold all rates. A display label that covers more than one series is withheld:
+    merging two links would fabricate a rate.
+    """
+    values, invalid = window(ctx, hours)
+    audit = {"checked": 0, "invalid": 0}
+    identities = {"checked": 0, "invalid": 0}
+    series: dict[str, dict[str, list[Any]]] = {}
+    timestamps: dict[Any, int] = {}
+    for at, _row in values:
+        timestamps[at] = timestamps.get(at, 0) + 1
+    for position, (at, row) in enumerate(values):
+        peer_rows = row.get("peers")
+        if not isinstance(peer_rows, list):
+            continue
+        # Register identity BEFORE numeric validation: an invalid counter must
+        # not hide another series sharing a display label. Unassignable rows
+        # conservatively invalidate this entire observation, not other times.
+        observed: dict[tuple[str, str], Any] = {}
+        uncertain = timestamps[at] > 1
+        for peer in peer_rows:
+            if not isinstance(peer, dict):
+                uncertain = True
+                continue
+            key = peer_series_key(peer.get("r"))
+            identities["checked"] += 1
+            if key is None:
+                identities["invalid"] += 1
+                uncertain = True
+                continue
+            label = peer_label(peer.get("r"))
+            series.setdefault(label, {}).setdefault(key, [])
+            rx = throughput_counter(peer.get("rx"), audit)
+            tx = throughput_counter(peer.get("tx"), audit)
+            point = None if rx is None or tx is None else (rx, tx)
+            identity = (label, key)
+            if identity in observed and observed[identity] != point:
+                point = None  # conflicting duplicate: break both neighbours
+            observed[identity] = point
+        for (label, key), point in observed.items():
+            rx, tx = (None, None) if uncertain or point is None else point
+            series[label][key].append((position, at, rx, tx))
+    event(
+        "state",
+        "throughput_numeric_validation",
+        f"checked={audit['checked']} invalid={audit['invalid']} "
+        f"identities={identities['checked']} invalid_identities={identities['invalid']}",
+    )
+    ambiguous = {label for label, tracks in series.items() if len(tracks) > 1}
+    print(
+        f"window={hours}h samples={len(values)} invalid_records={invalid} "
+        f"peers={len(series) - len(ambiguous)} ambiguous_labels={len(ambiguous)} "
+        f"invalid_counters={audit['invalid']} invalid_identities={identities['invalid']}; "
+        f"passive counter deltas, NOT link capacity; "
+        f"history_provenance=unverified_role_writable_history "
+        f"authenticated=false immutable_since_capture=false"
+    )
+    if not series:
+        print("no_peer_counters: stored samples carry no usable peer counters")
+        return
+    if invalid:
+        # The reader discards malformed/timestampless records. Their position
+        # cannot be reconstructed, so no remaining pair has proved adjacency.
+        print("history_record_boundaries_unknown: rates withheld")
+        return
+    for label in sorted(ambiguous):
+        print(f"{label}: ambiguous_peer_label series={len(series[label])}")
+    for label in sorted(set(series) - ambiguous):
+        stats = throughput_track(next(iter(series[label].values())))
+        if not stats["intervals"]:
+            print(
+                f"{label}: no_usable_intervals gaps={stats['gaps']} "
+                f"resets={stats['resets']} unusable={stats['unusable']}"
+            )
+            continue
+        # Every contributing interval passed throughput_rate(), so the byte
+        # weighted average is inside the same finite domain.
+        average_out = stats["bytes_out"] * 8 / stats["seconds"] / 1e6
+        average_in = stats["bytes_in"] * 8 / stats["seconds"] / 1e6
+        print(
+            f"{label}: sent={average_out:.2f}Mbit/s peak={stats['peak_out']:.2f} "
+            f"recv={average_in:.2f}Mbit/s peak={stats['peak_in']:.2f} "
+            f"intervals={stats['intervals']} gaps={stats['gaps']} "
+            f"resets={stats['resets']} unusable={stats['unusable']}"
+        )

@@ -363,3 +363,24 @@ existing journal is retained. Restore the intended policy/runtime evidence and
 retry recovery; do not delete the journal to bypass proof. No automatic network
 repair, new journal format or installation change is introduced. The changed
 checks.py hash needs review in the external deployment integrity manifest.
+
+## Stored-history throughput (5.13.0, 2026-10-27)
+
+| ID | Invocation / precondition | Visible result / side effects | Error / interpretation limit |
+| --- | --- | --- | --- |
+| CLI-THROUGHPUT-SOURCE | Bounded in-window `metrics.jsonl` samples | Per-series mean/peak send and receive rates from adjacent counter deltas | Counters are writer-owned local observations; a role-writable history is not authenticated evidence and does not prove delivered or useful traffic. |
+| CLI-THROUGHPUT-IDENTITY | Peer rows grouped by a credential-free series key: scheme, endpoint, WebSocket path and the public `key` pin | Two links at one endpoint keep separate series even when their display label matches | A label covering more than one series is reported as `ambiguous_peer_label` and withheld; display labels are not identity. Identical rows are one series. |
+| CLI-THROUGHPUT-PATH | Duplicate timestamps, counter reset, sampling gap, out-of-domain counters or rates | Duplicate/zero intervals skipped silently; resets, gaps and unusable intervals counted and shown per label; unusable counters counted in the header | No clamping, interpolation or gap extrapolation. Counters above 2**53 and rates above the documented 1 Tbit/s bound are unusable, never printed as `inf`/`nan`. A reset is not a zero rate and a gap is not a slow link. |
+| CLI-THROUGHPUT-SCOPE | Any invocation | Text only; exit status unchanged from other read-only metric views | Not a throughput test, not a capacity estimate, not a probe of peer reachability or path quality. Compare with a deliberate end-to-end transfer before drawing conclusions. |
+
+### Throughput adjacency and provenance (5.13.0)
+
+Every result emits `history_provenance=unverified_role_writable_history`,
+`authenticated=false`, `immutable_since_capture=false`. It does not authenticate
+collector/API truth. Invalid counters, missing peers/rows, conflicting duplicate
+identities and duplicate timestamps break adjacency; valid rates resume after two
+new adjacent usable observations. Identical within-sample duplicates deduplicate.
+Invalid-counter identities still cause display-label ambiguity. Unassignable rows
+invalidate the containing sample; malformed records with unknown positions emit
+`history_record_boundaries_unknown: rates withheld`. No probing, writes, schema,
+service, notification, policy or gate changes. Readable metrics need no sudo.
