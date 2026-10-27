@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.12.5] - 2026-10-27
+
+- Refuse underlay proof if either service PID changes between the two reads,
+  instead of accepting old socket evidence for the observed new PID.
+- Recheck both service exclusions before accepting underlay proof, so a split
+  change during observation does not make the earlier list look current.
+
 ## [5.12.4] - 2026-10-27
 
 - Honor a trusted `outbound.paused` sidecar beside the configured shared profile

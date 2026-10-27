@@ -154,6 +154,13 @@ Failure preserves the active journal for explicit retry and blocks new mutations
 Preview remains read-only and performs neither restart nor underlay probing.
 No new journal schema, retry loop, live-leak or power-loss guarantee is introduced.
 
+Underlay proof rereads both service PIDs and their split exclusions after examining
+sockets and conntrack. If either PID changed or disappeared, or a relevant exclusion
+no longer matches the selected mode, the proof fails; transaction compensation and
+explicit recovery use their existing failure rules.
+This is still a sampled check: it cannot rule out PID reuse or changes between
+or after the separate final reads, and is not a guarantee about future traffic.
+
 ### Other commands
 
 Peer/config transactions generally preview unless `--apply` is supplied.

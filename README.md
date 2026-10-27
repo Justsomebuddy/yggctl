@@ -1,3 +1,8 @@
+> Source **5.12.5** rejects stale underlay evidence when either service PID or
+> its split-tunnel exclusion changes during the check. Rollback and explicit
+> recovery still need a fresh restored-mode proof. This remains a sampled,
+> non-atomic observation. See [qualification and limits](docs/RELEASE-5.12.5.md).
+
 > Source **5.12.4** honors the native profile's operator outbound pause. Paused
 > forwarding is explicitly deferred, not delivered; old ambiguous attempts remain
 > unresent. See [the release record](docs/RELEASE-5.12.4.md) and
@@ -72,7 +77,7 @@ sockets. Broker test fixtures use Linux `/proc/self/fd` to handle long checkout
 paths. They do not exercise a provisioned node or prove runtime isolation.
 The stdlib suites and supplemental Pytest cases cover synthetic behavior,
 faults and boundary conditions. Exact tested-source evidence belongs to the
-[release records](docs/RELEASE-5.12.4.md), not a timeless test-count promise.
+[release records](docs/RELEASE-5.12.5.md), not a timeless test-count promise.
 Statement/branch coverage does not prove correctness or qualify a live deployment.
 For lint, types, Pytest discovery and coverage, see the
 [QA instructions](docs/VERIFICATION.md#reproducing-source-checks).
