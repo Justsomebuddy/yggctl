@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Refuse underlay proof if either service PID changes during observation. This
+  prevents old socket and conntrack evidence from certifying a restarted service.
+
 ## [5.12.4] - 2026-10-27
 
 - Honor a trusted `outbound.paused` sidecar beside the configured shared profile

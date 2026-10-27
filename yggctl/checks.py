@@ -411,6 +411,11 @@ def underlay(ctx):
     tcp_peer_marks(ctx, pids, sockets, conn, mode)
     if not all(proof.values()):
         raise Failure("underlay_own_socket_proof_missing")
+    # A restart can leave old socket/conntrack observations behind while the
+    # current service already runs under a different PID. Do not accept that
+    # mixed snapshot as proof for the new process.
+    if pids != [int(ctx.unit(u).get("MainPID", "0")) for u in (NODE, STACK)]:
+        raise Failure("underlay_service_pid_changed")
     return {"mode": mode, "own_connections": list(proof.values())}
 
 
