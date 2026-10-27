@@ -1655,6 +1655,7 @@ def throughput(ctx, hours=24):
     audit = {"checked": 0, "invalid": 0}
     identities = {"checked": 0, "invalid": 0}
     series: dict[str, dict[str, list[Any]]] = {}
+    unverifiable_ws: set[str] = set()
     timestamps: dict[Any, int] = {}
     for at, _row in values:
         timestamps[at] = timestamps.get(at, 0) + 1
@@ -1679,6 +1680,12 @@ def throughput(ctx, hours=24):
                 continue
             label = peer_label(peer.get("r"))
             series.setdefault(label, {}).setdefault(key, [])
+            uri = urllib.parse.urlsplit(peer["r"])
+            if uri.scheme in ("ws", "wss") and uri.path in ("", "/"):
+                # Collection redacts WS paths, so a bare saved endpoint can
+                # represent different connections. Legacy rows have the same
+                # ambiguity; never reconstruct or persist private paths.
+                unverifiable_ws.add(label)
             rx = throughput_counter(peer.get("rx"), audit)
             tx = throughput_counter(peer.get("tx"), audit)
             point = None if rx is None or tx is None else (rx, tx)
@@ -1695,11 +1702,13 @@ def throughput(ctx, hours=24):
         f"checked={audit['checked']} invalid={audit['invalid']} "
         f"identities={identities['checked']} invalid_identities={identities['invalid']}",
     )
-    ambiguous = {label for label, tracks in series.items() if len(tracks) > 1}
+    ambiguous = {label for label, tracks in series.items() if len(tracks) > 1} - unverifiable_ws
+    withheld = ambiguous | unverifiable_ws
     print(
         f"window={hours}h samples={len(values)} invalid_records={invalid} "
-        f"peers={len(series) - len(ambiguous)} ambiguous_labels={len(ambiguous)} "
-        f"invalid_counters={audit['invalid']} invalid_identities={identities['invalid']}; "
+        f"peers={len(series) - len(withheld)} ambiguous_labels={len(ambiguous)} "
+        f"invalid_counters={audit['invalid']} invalid_identities={identities['invalid']} "
+        f"unverifiable_labels={len(unverifiable_ws)}; "
         f"passive counter deltas, NOT link capacity; "
         f"history_provenance=unverified_role_writable_history "
         f"authenticated=false immutable_since_capture=false"
@@ -1712,9 +1721,12 @@ def throughput(ctx, hours=24):
         # cannot be reconstructed, so no remaining pair has proved adjacency.
         print("history_record_boundaries_unknown: rates withheld")
         return
-    for label in sorted(ambiguous):
-        print(f"{label}: ambiguous_peer_label series={len(series[label])}")
-    for label in sorted(set(series) - ambiguous):
+    for label in sorted(withheld):
+        if label in unverifiable_ws:
+            print(f"{label}: identity_unverifiable; rate withheld")
+        else:
+            print(f"{label}: ambiguous_peer_label series={len(series[label])}")
+    for label in sorted(set(series) - withheld):
         stats = throughput_track(next(iter(series[label].values())))
         if not stats["intervals"]:
             print(

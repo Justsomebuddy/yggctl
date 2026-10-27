@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Withhold throughput rates for WS/WSS endpoint labels when the stored row
+  has no distinguishing path. The collector redacts private paths, so such
+  labels cannot prove that adjacent counters belong to the same link.
+
 ## [5.14.1] - 2026-10-27
 
 - Normalize calendar overflow during research timestamp UTC conversion and

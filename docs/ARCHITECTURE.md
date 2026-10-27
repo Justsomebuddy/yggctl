@@ -231,6 +231,13 @@ sample positions; missing members cannot be silently removed before pairing.
 Counter resets/gaps/non-finite or out-of-domain values are not clamped or filled.
 Duplicate timestamps and conflicting rows are barriers. Ambiguous display labels
 are withheld across the window, including identities with invalid counters.
+Stored bare or root-path WS/WSS labels are also withheld as
+`identity_unverifiable`: collection can redact different private paths to the
+same endpoint. This conservative rule includes legacy rows and bare endpoints
+with a public key pin, and does not persist or reconstruct paths. Explicit
+non-root paths, when present in older records,
+still participate in the existing ambiguity check; neither path nor pin
+authenticates the underlying connection.
 A discarded record with unknown position prevents proving any adjacency, so all
 rates are withheld. Generated text constructs its own role-writable provenance.
 
