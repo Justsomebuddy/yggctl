@@ -1,5 +1,16 @@
 # Changelog
 
+## [5.14.0] - 2026-10-27
+
+- Add read-only `overlay-policy [interface]`: TUN/zone inspection and a bounded
+  static sample verdict for an established `inet mullvad output` filter chain.
+- Expose destination200::1/interface/chain scope, `host_permission=unknown` and
+  `reachability=not_tested`. A sample/chain accept is NOT host permission.
+- Treat limit/quota, state mutations and jump/goto as unsupported/conditional;
+  never erase earlier uncertainty at return. Reject malformed index members and
+  validate match types and real nft JSON prefix operands. Inspection failure
+  never proves absence or permission. No policy/gate changes or packet probes.
+
 ## [5.13.0] - 2026-10-27
 
 - Add stored-history `throughput [hours]`, mean/peak observed send/receive Mbit/s.

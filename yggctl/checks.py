@@ -1,6 +1,7 @@
 """Fail-closed structured health checks, including PID-bound underlay proof."""
 
 from pathlib import Path
+from typing import Any, cast
 import ipaddress
 import math
 import json
@@ -896,3 +897,310 @@ def tcp_peer_marks(ctx, pids, sockets, conn, mode):
                 raise Failure("underlay_peer_socket_proof_missing")
             if any(mark != (mode == "direct") for mark in marks):
                 raise Failure("underlay_peer_mark_mismatch")
+
+
+# Overlay policy diagnosis: a read-only, static interpretation of the effective
+# nftables ruleset. It does not inject packets and never edits rules. Text output
+# is parsed for firewalld zones only; nft rules come from the JSON schema, so a
+# rule that only matches source addresses, a negated prefix, a port or an
+# unreachable accept cannot be mistaken for a general overlay allowance.
+OVERLAY_SAMPLE = ipaddress.ip_address("200::1")
+OVERLAY_PATH_LIMIT = 64
+OVERLAY_ITEM_LIMIT = 10_000
+OVERLAY_TERMINAL = ("accept", "drop", "reject")
+OVERLAY_NON_MATCH = ("counter", "log", "comment")
+
+
+@logged
+def zone_interfaces(text):
+    """Interface membership only; no claim about firewalld permissions."""
+    zones: dict[str, str] = {}
+    zone = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            zone = line.split()[0]
+            continue
+        name, _, value = line.strip().partition(":")
+        if name == "interfaces" and zone:
+            for interface in value.split():
+                zones[interface] = zone
+    return zones
+
+
+@logged
+def tun_interfaces(text):
+    """TUN names from ip's detailed output; not proof of overlay identity."""
+    names = []
+    current = ""
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            current = line.split(":", 2)[1].strip().split("@")[0] if ":" in line else ""
+        elif current and "tun type tun" in line:
+            names.append(current)
+    return names
+
+
+@logged
+def preferred_interface(devices):
+    """Name heuristic, never an authenticated interface-role determination."""
+    for name in devices:
+        if name.startswith(("ygg", "yg", "tun")):
+            return name
+    return devices[0] if devices else ""
+
+
+@logged
+def nft_chains(data):
+    """Bounded chain/rule index; reject malformed members rather than omit rules."""
+    if not isinstance(data, dict) or not isinstance(data.get("nftables"), list):
+        raise Failure("invalid_nft_json")
+    if len(data["nftables"]) > OVERLAY_ITEM_LIMIT:
+        raise Failure("invalid_nft_json")
+    chains: dict[tuple[str, str, str], dict] = {}
+    rules: dict[tuple[str, str, str], list] = {}
+    for item in data["nftables"]:
+        if not isinstance(item, dict) or len(item) != 1:
+            raise Failure("invalid_nft_json")
+        kind, body = next(iter(item.items()))
+        if kind not in ("chain", "rule"):
+            continue
+        if not isinstance(body, dict):
+            raise Failure("invalid_nft_json")
+        family, table = body.get("family"), body.get("table")
+        member = body.get("name") if kind == "chain" else body.get("chain")
+        if not all(isinstance(v, str) and v for v in (family, table, member)):
+            raise Failure("invalid_nft_json")
+        key = cast(tuple[str, str, str], (family, table, member))
+        if kind == "chain":
+            if key in chains:
+                raise Failure("invalid_nft_json")
+            chains[key] = {**body, "rules": []}
+        else:
+            rules.setdefault(key, []).append(body)
+    for key, rows in rules.items():
+        if key not in chains:
+            raise Failure("invalid_nft_json")
+        chains[key]["rules"] = rows
+    return chains
+
+
+@logged
+def overlay_network(value):
+    """Supported scalar/prefix JSON operand; unsupported forms fail closed."""
+    if isinstance(value, str):
+        return ipaddress.ip_network(value, strict=False)
+    if isinstance(value, dict) and set(value) == {"prefix"}:
+        spec = value["prefix"]
+        if (
+            isinstance(spec, dict)
+            and set(spec) == {"addr", "len"}
+            and isinstance(spec["addr"], str)
+            and type(spec["len"]) is int
+            and 0 <= spec["len"] <= 128
+        ):
+            return ipaddress.ip_network(f"{spec['addr']}/{spec['len']}", strict=False)
+    raise ValueError("unsupported_overlay_operand")
+
+
+@logged
+def overlay_prefix_match(right, op):
+    """Match ONLY the hypothetical destination200::1, not all200::/7."""
+    if op not in ("==", "!="):
+        return "unknown"
+    if isinstance(right, dict) and set(right) == {"set"}:
+        right = right["set"]
+    values = right if isinstance(right, list) else [right]
+    if not values or len(values) > OVERLAY_PATH_LIMIT:
+        return "unknown"
+    try:
+        networks = [overlay_network(value) for value in values]
+    except ValueError:
+        return "unknown"
+    hit = any(OVERLAY_SAMPLE in network for network in networks)
+    return "match" if hit == (op == "==") else "miss"
+
+
+@logged
+def overlay_match(match, interface):
+    """Conservative conjunction input for one hypothetical packet."""
+    if not isinstance(match, dict):
+        return "unknown"
+    left, op = match.get("left"), match.get("op")
+    if not isinstance(left, dict) or len(left) != 1 or op not in ("==", "!="):
+        return "unknown"
+    kind, spec = next(iter(left.items()))
+    if kind == "meta" and isinstance(spec, dict):
+        if spec.get("key") == "oifname" and isinstance(match.get("right"), str) and interface:
+            return "match" if (match["right"] == interface) == (op == "==") else "miss"
+        return "unknown"
+    if kind == "payload" and isinstance(spec, dict):
+        if spec.get("protocol") == "ip6" and spec.get("field") == "daddr":
+            return overlay_prefix_match(match.get("right"), op)
+    return "unknown"
+
+
+@logged
+def overlay_rule(exprs, interface):
+    """Stop on unsupported predicates/state changes; never erase uncertainty."""
+    if not isinstance(exprs, list) or len(exprs) > OVERLAY_PATH_LIMIT:
+        return "unknown", None, None
+    for expr in exprs:
+        if not isinstance(expr, dict) or len(expr) != 1:
+            return "unknown", None, None
+        kind, body = next(iter(expr.items()))
+        if kind in OVERLAY_NON_MATCH:
+            if (
+                body is None
+                or isinstance(body, dict)
+                or (kind == "comment" and isinstance(body, str))
+            ):
+                continue
+            return "unknown", None, None
+        if kind in OVERLAY_TERMINAL:
+            if body is not None and not (kind == "reject" and isinstance(body, dict)):
+                return "unknown", None, None
+            return "match", kind, None
+        if kind == "return":
+            return ("match" if body is None else "unknown"), "return", None
+        if kind in ("jump", "goto"):
+            return "unknown", kind, None  # deliberately unsupported, no fake stack semantics
+        if kind != "match":
+            return "unknown", None, None  # includes limit/quota/notrack/ct/mark mutations
+        outcome = overlay_match(body, interface)
+        if outcome != "match":
+            return outcome, None, None
+    return "match", None, None
+
+
+@logged
+def overlay_chain(chains, key, interface):
+    """Scoped base-chain sample verdict; never a host permission/reachability verdict."""
+    chain = chains.get(key)
+    path: list[dict[str, Any]] = []
+    result = {"verdict": "unknown", "reason": "chain_missing", "matched": None, "path": path}
+    if chain is None:
+        return result
+    if (
+        chain.get("type") != "filter"
+        or chain.get("hook") != "output"
+        or type(chain.get("prio")) is not int
+        or not -(1 << 31) <= chain["prio"] < (1 << 31)
+    ):
+        return {**result, "reason": "output_base_chain_not_established"}
+    for rule in chain["rules"]:
+        if len(path) >= OVERLAY_PATH_LIMIT:
+            return {**result, "verdict": "conditional", "reason": "evaluation_budget"}
+        state, action, _target = overlay_rule(rule.get("expr"), interface)
+        path.append({"handle": rule.get("handle"), "state": state, "action": action})
+        if state == "miss":
+            continue
+        if state == "unknown":
+            return {
+                **result,
+                "verdict": "conditional",
+                "reason": "unsupported_predicate_or_control_flow",
+            }
+        if action is None:
+            continue
+        if action == "return":
+            break  # only a known, unconditional return of an established base chain
+        return {
+            **result,
+            "verdict": "allowed" if action == "accept" else "denied",
+            "reason": None,
+            "matched": rule.get("handle"),
+        }
+    policy = chain.get("policy")
+    if policy not in ("accept", "drop"):
+        return {**result, "reason": "chain_no_verdict"}
+    return {**result, "verdict": "allowed" if policy == "accept" else "denied", "reason": None}
+
+
+@logged
+def overlay_read(ctx, name, argv, inspection, limitations):
+    """Read-only external inspection; failed is not absent or permission."""
+    event("external", "overlay_inspection", name)
+    try:
+        return ctx.run(argv).stdout.decode()
+    except Failure as exc:
+        status = "unavailable" if str(exc).startswith("external_unavailable") else "failed"
+    except UnicodeError:
+        status = "invalid_text"
+    inspection[name] = status
+    limitations.append(f"{name}_inspection_{status}")
+    return None
+
+
+@logged
+def overlay_policy(ctx, interface=None):
+    """Local command snapshots and one hypothetical path, without policy mutation."""
+    if interface is not None and (
+        not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", interface)
+    ):
+        raise Failure("invalid_overlay_interface")
+    limitations = ["sample_not_overlay_wide", "other_chains_hooks_and_routing_not_evaluated"]
+    findings: list[str] = []
+    inspection = {"ip": "ok", "nft": "ok", "firewalld": "ok"}
+    text = overlay_read(ctx, "ip", ["/usr/sbin/ip", "-d", "link", "show"], inspection, limitations)
+    devices = tun_interfaces(text) if text is not None else []
+    target = interface or preferred_interface(devices)
+    if not target and inspection["ip"] == "ok":
+        findings.append("tun_interface_not_found")
+    text = overlay_read(
+        ctx, "firewalld", ["/usr/bin/firewall-cmd", "--get-active-zones"], inspection, limitations
+    )
+    zones = zone_interfaces(text) if text is not None else {}
+    text = overlay_read(
+        ctx, "nft", ["/usr/sbin/nft", "-j", "list", "ruleset"], inspection, limitations
+    )
+    chains: dict[tuple[str, str, str], dict] = {}
+    if text is not None:
+        try:
+            chains = nft_chains(json.loads(text))
+        except (ValueError, Failure):
+            inspection["nft"] = "invalid_json"
+            limitations.append("nft_inspection_invalid_json")
+    key = ("inet", "mullvad", "output")
+    result = overlay_chain(chains, key, target)
+    if inspection["nft"] != "ok":
+        result["reason"] = "nft_inspection_incomplete"
+    if result["reason"] == "chain_missing":
+        limitations.append("mullvad_chain_missing")
+    if result["verdict"] == "denied":
+        findings.append("mullvad_output_rejects_sample")
+    if result["verdict"] == "conditional":
+        limitations.append("conditional_rules_require_packet_trace")
+    if result["verdict"] == "unknown":
+        limitations.append("sample_verdict_unknown")
+    event("state", "overlay_sample_verdict", result["verdict"])
+    return {
+        "interface": target or None,
+        "interface_selection": "explicit"
+        if interface
+        else ("name_heuristic" if target else "none"),
+        "interface_role": "unverified",
+        "tun_devices": devices,
+        "firewalld_zone": zones.get(target),
+        "firewalld_evidence": "zone_membership_is_not_permission",
+        "mullvad_output_policy": chains.get(key, {}).get("policy") or None,
+        "sample_scope": {
+            "family": "inet",
+            "table": "mullvad",
+            "chain": "output",
+            "hook": "output",
+            "destination": str(OVERLAY_SAMPLE),
+            "output_interface": target or None,
+            "other_packet_fields": "unspecified",
+        },
+        "sample_verdict": result["verdict"],
+        "host_permission": "unknown",
+        "reachability": "not_tested",
+        "matched_rule": result["matched"],
+        "evaluated_rules": result["path"],
+        "inspection": inspection,
+        "limitations": limitations,
+        "findings": findings,
+        "side_effects": "none; read-only commands only, no firewall changes",
+    }

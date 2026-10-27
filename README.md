@@ -1,3 +1,9 @@
+> Source **5.14.0** adds read-only `overlay-policy [interface]`. Results name
+> one hypothetical destination and one established base-chain scope; they never
+> assert host-wide permission or reachability. Unknown predicates/control flow
+> remain conditional. No rules, zones, interfaces or node configuration change.
+> See [qualification and limits](docs/RELEASE-5.14.0.md).
+
 > Source **5.13.0** adds read-only `throughput [hours]` (default24,1..72).
 > It rates only adjacent unambiguous stored observations, breaks at missing or
 > invalid samples, and visibly qualifies role-writable history. This is passive

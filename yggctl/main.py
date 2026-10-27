@@ -42,7 +42,8 @@ HELP = """yggctl 5 — управление нодой Yggdrasil лаборат�
 
 Здоровье:     check (15 проверок), status, selftest [offline], guard, verify-hashes, socks, socks-test
 Просмотр:     peers, stack-peers, self, tree, paths, sessions, config [show|validate], mode [show],
-              version, update-check, logs [N], events [часы], firewall-status
+              version, update-check, logs [N], events [часы], firewall-status,
+              overlay-policy [интерфейс]
 Метрики:      collect, stats [часы], graph [часы], trend [часы] [json], throughput [часы],
               watch/top [N] [секунды],
               report, peers-score,
@@ -558,6 +559,12 @@ def do_firewall_status(ctx, args, a):
 
 
 @logged
+def do_overlay_policy(ctx, args, a):
+    # Read-only: explains firewall blockers; never edits zones or nft rules.
+    output(checks.overlay_policy(ctx, a[0] if a else None))
+
+
+@logged
 def do_ping(ctx, args, a):
     if len(a) != 1:
         raise Failure("one_overlay_ipv6_port_required")
@@ -688,6 +695,7 @@ COMMANDS = {
     "logs": Command(do_logs, most=1),
     "events": Command(do_logs, most=1),
     "firewall-status": Command(do_firewall_status),
+    "overlay-policy": Command(do_overlay_policy, most=1),
     "ping": Command(do_ping, most=1),
     "bench": Command(do_bench, most=1),
     "nodeinfo": Command(do_nodeinfo, most=1),

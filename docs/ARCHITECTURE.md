@@ -233,3 +233,22 @@ Duplicate timestamps and conflicting rows are barriers. Ambiguous display labels
 are withheld across the window, including identities with invalid counters.
 A discarded record with unknown position prevents proving any adjacency, so all
 rates are withheld. Generated text constructs its own role-writable provenance.
+
+## Scoped static overlay diagnosis (5.14.0)
+
+`overlay-policy` is a root read-only snapshot of local commands. It interprets a
+bounded subset of one established filter/output base chain for destination200::1
+and the disclosed output interface. Numeric `oif` indexes, ports, source address,
+ct/state, rate/quota predicates and jump/goto are not inferred. Known base-chain
+return uses its policy; unsupported earlier state returns conditional immediately.
+No global packet-path solver, routing evaluation or reachability probe is present.
+
+A chain name alone does not establish a hook; a /128 accept cannot establish a
+prefix-wide result. Accepted packets can meet further chains, hence every result
+keeps host permission unknown. Rule/index malformed input cannot be silently
+omitted, and failed command inspection is distinct from observed absence.
+Reference semantics: [base chains](https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains)
+and [jump/goto](https://wiki.nftables.org/wiki-nftables/index.php/Jumping_to_chain).
+The initial implementation deliberately declines jump/goto instead of claiming to
+implement their distinct return-stack semantics. Existing health gates, default
+SOCKS-only/no-TUN deployment, firewall acceptance and sends are unchanged.
