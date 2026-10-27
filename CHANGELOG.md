@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Serialize `mode direct|tunnel --apply` before reading the current mode and
+  reject an unfinished transaction even when the requested mode matches.
+  Read-only mode proofs and transaction recovery remain available.
+
 ## [5.14.1] - 2026-10-27
 
 - Normalize calendar overflow during research timestamp UTC conversion and

@@ -154,6 +154,11 @@ Failure preserves the active journal for explicit retry and blocks new mutations
 Preview remains read-only and performs neither restart nor underlay probing.
 No new journal schema, retry loop, live-leak or power-loss guarantee is introduced.
 
+An applied mode request holds the console lock before reading the current mode.
+It refuses an active transaction journal even when the requested mode already
+matches; a concurrent request rechecks the mode after the earlier operation ends.
+Read-only mode proofs remain available, and do not clear a recovery journal.
+
 Underlay proof rereads both service PIDs and their split exclusions after examining
 sockets and conntrack. If either PID changed or disappeared, or a relevant exclusion
 no longer matches the selected mode, the proof fails; transaction compensation and
