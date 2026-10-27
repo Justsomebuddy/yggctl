@@ -56,11 +56,11 @@ def instant(value):
         raise Failure("research_invalid_timestamp")
     try:
         at = dt.datetime.fromisoformat(value)
-    except ValueError:
+        if at.tzinfo is None:
+            raise Failure("research_naive_timestamp")
+        return at.astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError):
         raise Failure("research_invalid_timestamp") from None
-    if at.tzinfo is None:
-        raise Failure("research_naive_timestamp")
-    return at.astimezone(dt.timezone.utc)
 
 
 @logged

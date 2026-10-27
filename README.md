@@ -1,3 +1,8 @@
+> Source **5.14.1** normalizes unrepresentable research timestamps and metric
+> windows to typed errors. Bad metric rows are counted without discarding good
+> neighbors; invalid snapshots are rejected without rewriting stored history.
+> See [qualification and scope](docs/RELEASE-5.14.1.md).
+
 > Source **5.14.0** adds read-only `overlay-policy [interface]`. Results name
 > one hypothetical destination and one established base-chain scope; they never
 > assert host-wide permission or reachability. Unknown predicates/control flow

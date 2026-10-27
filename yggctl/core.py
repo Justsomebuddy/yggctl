@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "5.14.0"
+VERSION = "5.14.1"
 # The reader accepts the writer's full pre-compaction retention window.
 METRIC_RETENTION = 10000
 METRIC_RECORD_LIMIT = METRIC_RETENTION * 6 // 5

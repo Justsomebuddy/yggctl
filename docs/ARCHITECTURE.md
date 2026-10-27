@@ -252,3 +252,13 @@ and [jump/goto](https://wiki.nftables.org/wiki-nftables/index.php/Jumping_to_cha
 The initial implementation deliberately declines jump/goto instead of claiming to
 implement their distinct return-stack semantics. Existing health gates, default
 SOCKS-only/no-TUN deployment, firewall acceptance and sends are unchanged.
+
+## Research date failures (5.14.1)
+
+`research.model.instant` converts ISO parsing and UTC normalization failures into
+existing typed timestamp errors; naive dates stay distinct. `research.metrics`
+normalizes unrepresentable window subtraction separately. Invalid metric rows
+are counted without losing valid neighbors. Snapshot validation remains strict
+and read-only; no automatic repair, reserialization, stronger provenance or new
+exception catch-all is introduced. See [release scope](RELEASE-5.14.1.md) and the
+[CLI error contract](UI_MAP.md#research-calendar-boundary-failures-5141).

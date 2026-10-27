@@ -1,5 +1,15 @@
 # Changelog
 
+## [5.14.1] - 2026-10-27
+
+- Normalize calendar overflow during research timestamp UTC conversion and
+  metric-window subtraction to `research_invalid_timestamp`; keep naive dates
+  distinct as `research_naive_timestamp`.
+- Preserve valid metric records next to an invalid date, count invalid records,
+  and reject invalid saved snapshots without rewriting history.
+- Add synthetic calendar and real-report regressions; retain provenance,
+  collection limits, privileges and all node/firewall/notification behavior.
+
 ## [5.14.0] - 2026-10-27
 
 - Add read-only `overlay-policy [interface]`: TUN/zone inspection and a bounded

@@ -46,7 +46,10 @@ def summary(records, hours, now):
     if not isinstance(records, list) or len(records) > METRIC_RECORD_LIMIT:
         raise Failure("research_metric_record_limit")
     end = instant(now)
-    begin = end - dt.timedelta(hours=hours)
+    try:
+        begin = end - dt.timedelta(hours=hours)
+    except OverflowError:
+        raise Failure("research_invalid_timestamp") from None
     valid: list[tuple[dt.datetime, dict[str, Any]]] = []
     seen: dict[dt.datetime, int] = {}
     invalid, outside, duplicates = 0, 0, 0

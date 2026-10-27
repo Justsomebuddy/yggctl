@@ -1,3 +1,16 @@
+## Research calendar-boundary failures (5.14.1)
+
+| ID | Invocation / preconditions | Successful, degraded and error output | Side effects |
+|---|---|---|---|
+| RESEARCH-DATE | Existing `research report [1..72 hours]` / research snapshot readers; bounded stored observations and existing role/integrity prerequisites | Representable aware timestamps remain UTC-normalized. Unrepresentable timestamps become `research_invalid_timestamp`; naive ones retain `research_naive_timestamp`. Invalid metric rows increase `invalid_records` while usable neighbors remain. Invalid snapshots are rejected, not silently rewritten. | Existing report artifacts only on normal report success; no stored history rewrite, configuration, service, network-policy or notification change. |
+| RESEARCH-WINDOW | Metric summary's valid aware end time and integer1..72h window | Calendar underflow becomes `research_invalid_timestamp`, not raw `OverflowError`; exact representable lower bound remains valid. | No new I/O or mutation. |
+
+This does not harden every date calculation: `research.report` still assumes a
+representable system-clock-derived window before calling metric summary. A
+synthetically injected year1 clock can overflow there. This is separate from
+hostile stored dates; no remote-node exploit or authenticated-history guarantee
+is claimed. [Release scope](RELEASE-5.14.1.md).
+
 ## Operator outbound pause (5.12.4)
 
 | ID | Entry / state | Result and limits |
