@@ -1,5 +1,6 @@
 """Serialized config transactions with durable preimages and compensation."""
 
+import contextlib
 import json
 import re
 import time
@@ -195,16 +196,22 @@ def change_mode(ctx, mode, apply=False):
     ctx.root()
     if mode not in ("direct", "tunnel"):
         raise Failure("invalid_mode")
-    if ctx.mode() == mode:
-        underlay(ctx)
-        print("mode unchanged; runtime proof verified")
-        return
-    if not apply:
-        print("PREVIEW: restart both services; use --apply after firewall review")
-        return
-    transaction(
-        ctx, {ctx.p.etc / "mode": mode + "\n"}, lambda: mode_action(ctx), lambda: restart_pair(ctx)
-    )
+    with ctx.locked() if apply else contextlib.nullcontext():
+        if apply and (ctx.p.state / "transaction.json").exists():
+            raise Failure("unfinished_transaction_run_recover_transaction")
+        if ctx.mode() == mode:
+            underlay(ctx)
+            print("mode unchanged; runtime proof verified")
+            return
+        if not apply:
+            print("PREVIEW: restart both services; use --apply after firewall review")
+            return
+        transaction(
+            ctx,
+            {ctx.p.etc / "mode": mode + "\n"},
+            lambda: mode_action(ctx),
+            lambda: restart_pair(ctx),
+        )
 
 
 @logged
