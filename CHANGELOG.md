@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.13.0] - 2026-10-27
+
+- Add stored-history `throughput [hours]`, mean/peak observed send/receive Mbit/s.
+- Never bridge missing, invalid, conflicting or duplicate-timestamp observations;
+  preserve identity collisions even when their counters are invalid. Unknown
+  malformed-record positions withhold rates. Emit writable-history provenance.
+- Preserve contribution ancestry; remove inherited duplicate test collection.
+
 ## [5.12.5] - 2026-10-27
 
 - Refuse underlay proof if either service PID changes between the two reads,
