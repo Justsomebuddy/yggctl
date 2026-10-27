@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [5.12.5] - 2026-10-27
 
 - Refuse underlay proof if either service PID changes between the two reads,
   instead of accepting old socket evidence for the observed new PID.
