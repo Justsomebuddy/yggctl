@@ -1,3 +1,13 @@
+## Broker shutdown and pending admin requests (unreleased)
+
+| ID | Invocation / preconditions | Successful, degraded and error output | Side effects |
+|---|---|---|---|
+| IPC-ADMIN-CANCEL | Existing sandboxed command with an active allowlisted admin read; command interruption or worker-launcher failure closes its root broker | The original command/launcher failure remains authoritative. The active admin read is cancelled internally with `external_cancelled`; a closed IPC does not claim a valid response. Normal successful replies, nonzero statuses and request deadlines are unchanged. | Broker shutdown cancels and waits for its own admin subprocess to be killed and reaped before returning. Other brokers sharing a Context are unaffected. No node, peer, firewall, stored observation or notification mutation. |
+
+This covers orderly broker cleanup after handled interruption or worker failure.
+It does not promise cleanup after an unhandled root-parent SIGKILL, kernel failure
+or host power loss. A deployment's systemd cgroup cleanup is a separate safeguard.
+
 ## Research calendar-boundary failures (5.14.1)
 
 | ID | Invocation / preconditions | Successful, degraded and error output | Side effects |

@@ -141,9 +141,20 @@ def logged(fn):
 
 @logged
 def bounded_process(
-    argv, *, input=None, stdout=None, stderr=None, timeout=20, env=None, pass_fds=(), check=False
+    argv,
+    *,
+    input=None,
+    stdout=None,
+    stderr=None,
+    timeout=20,
+    env=None,
+    pass_fds=(),
+    check=False,
+    cancel=None,
 ):
     """Multiplex bounded pipes; no plaintext spooling and no unbounded communicate()."""
+    if cancel is not None and cancel.is_set():
+        raise Failure("external_cancelled")
     # Security review: caller supplies reviewed argv; shell execution is not enabled
     proc = subprocess.Popen(  # nosec B603
         argv,
@@ -173,10 +184,20 @@ def bounded_process(
                 selector.register(incoming, selectors.EVENT_WRITE, "in")
             else:
                 incoming.close()
-        while selector.get_map():
+        # A child may close both pipes and keep running. Its remaining lifetime
+        # must obey the same cancellation and deadline as its output reads.
+        while selector.get_map() or proc.poll() is None:
+            if cancel is not None and cancel.is_set():
+                raise Failure("external_cancelled")
             left = deadline - time.monotonic()
             if left <= 0:
                 raise subprocess.TimeoutExpired(Path(argv[0]).name, timeout)
+            if not selector.get_map():
+                try:
+                    proc.wait(timeout=min(left, 0.05))
+                except subprocess.TimeoutExpired:
+                    pass
+                continue
             for item, _ in selector.select(min(left, 0.5)):
                 if item.data == "in":
                     try:
@@ -288,7 +309,7 @@ class Context:
             raise Failure("root_required: run sudo yggctl")
 
     @logged
-    def run(self, argv, *, timeout=20, check=True, input=None, pass_fds=()):
+    def run(self, argv, *, timeout=20, check=True, input=None, pass_fds=(), cancel=None):
         executable = Path(argv[0]).name
         event("external_start", executable)
         env = {
@@ -306,6 +327,7 @@ class Context:
                 env=env,
                 pass_fds=pass_fds,
                 check=False,
+                **({} if cancel is None else {"cancel": cancel}),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             event("external_error", executable, type(exc).__name__)

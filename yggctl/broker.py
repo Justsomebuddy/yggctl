@@ -182,7 +182,7 @@ class Broker:
                 argv = admin_argv(
                     self.ctx, request.get("method"), request.get("args", []), self.role
                 )
-                r = self.ctx.run(argv, timeout=timeout, check=False)
+                r = self.ctx.run(argv, timeout=timeout, check=False, cancel=self.stop)
                 return {
                     "rc": r.returncode,
                     "stdout": base64.b64encode(r.stdout).decode(),
@@ -207,7 +207,9 @@ class Broker:
                 self.conn.shutdown(socket.SHUT_RDWR)
         with contextlib.suppress(OSError):
             self.path.unlink()
-        self.thread.join(timeout=2)
+        # The admin subprocess is owned by this broker, not by the worker unit.
+        # Do not return while its serving thread is still killing/reaping it.
+        self.thread.join()
 
     def __enter__(self):
         return self

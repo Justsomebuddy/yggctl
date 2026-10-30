@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+- Cancel and reap an active broker admin subprocess before broker shutdown
+  returns, including command interruption and worker-launcher failure. Keep
+  cancellation local to the broker; other concurrent brokers retain their
+  requests and normal timeout behavior.
+- Apply cancellation and the existing deadline while waiting for a child that
+  has already closed its output pipes. No role, admin allowlist or deployment
+  privilege changes.
+
 ## [5.14.1] - 2026-10-27
 
 - Normalize calendar overflow during research timestamp UTC conversion and
