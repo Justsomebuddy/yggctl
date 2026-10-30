@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
@@ -138,6 +139,12 @@ class BrokerCancellation(unittest.TestCase):
             "    sys.exit(7)\n"
             "elif method == 'getTree':\n"
             "    time.sleep(8)\n"
+            "elif method == 'getSessions':\n"
+            f"    marker = pathlib.Path({str(self.root / 'second-started')!r})\n"
+            "    marker.write_text(str(os.getpid()))\n"
+            f"    release = pathlib.Path({str(self.root / 'release-second')!r})\n"
+            "    while not release.exists(): time.sleep(.01)\n"
+            "    print('sessions-ok')\n"
         )
         script.chmod(0o700)
         self.paths = replace(
@@ -256,6 +263,59 @@ class BrokerCancellation(unittest.TestCase):
             release.set()
             closing.join(timeout=5)
             request.join(timeout=3)
+
+    @logged
+    def test_two_active_reads_cancel_only_the_closing_broker(self):
+        first, first_worker = self.serve()
+        second, second_worker = self.serve()
+        cancelled: dict[str, Any] = {}
+        completed: dict[str, Any] = {}
+
+        @logged
+        def request(worker, method, result):
+            try:
+                result["reply"] = worker.run(self.argv(method), timeout=6)
+            except (Failure, OSError) as exc:
+                result["error"] = exc
+
+        threads = [
+            threading.Thread(
+                target=request, args=(first_worker, "getSelf", cancelled), daemon=True
+            ),
+            threading.Thread(
+                target=request, args=(second_worker, "getSessions", completed), daemon=True
+            ),
+        ]
+        pids, handles = [], []
+        try:
+            for thread, marker in zip(threads, (self.marker, self.root / "second-started")):
+                thread.start()
+                pid = wait_for_marker(marker)
+                pids.append(pid)
+                handles.append(os.pidfd_open(pid))
+            first.close()
+            threads[0].join(timeout=3)
+            self.assertFalse(threads[0].is_alive())
+            self.assertIsInstance(cancelled.get("error"), (Failure, OSError))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pids[0], 0)
+            self.assertTrue(threads[1].is_alive())
+            os.kill(pids[1], 0)
+            self.assertFalse(second.stop.is_set())
+            (self.root / "release-second").touch()
+            threads[1].join(timeout=3)
+            self.assertFalse(threads[1].is_alive())
+            self.assertNotIn("error", completed)
+            self.assertEqual(completed["reply"].stdout, b"sessions-ok\n")
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pids[1], 0)
+        finally:
+            for handle in handles:
+                kill_owned_child(handle)
+                os.close(handle)
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(timeout=3)
 
     @logged
     def test_close_immediately_after_start_is_idempotent(self):
