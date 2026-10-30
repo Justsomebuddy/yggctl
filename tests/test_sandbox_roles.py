@@ -1,6 +1,7 @@
 """Role scoping for the broker allowlist and the per-role integrity check; no live service."""
 
 import contextlib
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -53,6 +54,7 @@ class SandboxRoles(ConsoleFixture):
             ctx = Context(self.paths, runner, require_root=False)
             obj = broker.Broker.__new__(broker.Broker)
             obj.ctx, obj.role, obj.uid = ctx, role, 1000
+            obj.stop = threading.Event()
             return broker.Broker.handle(
                 obj, '{"call":"admin","method":"' + method + '","args":["key=' + PIN + '"]}'
             )
