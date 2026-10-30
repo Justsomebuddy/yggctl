@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import BinaryIO, TypedDict, cast
 
 import collections
+from collections.abc import Callable
 import contextlib
 import dataclasses
 import datetime as dt
@@ -26,6 +27,7 @@ import syslog
 import tempfile
 import threading
 import time
+from types import FrameType
 import urllib.parse
 
 VERSION = "5.14.1"
@@ -139,31 +141,79 @@ def logged(fn):
     return traced
 
 
+@contextlib.contextmanager
+def _deferred_interrupts():
+    """Retain handled cancellation until a new child has an owned Popen object."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    handlers: dict[int, Callable[[int, FrameType | None], object]] = {}
+    pending: list[tuple[int, FrameType | None]] = []
+
+    def collect(signum: int, frame: FrameType | None):
+        # This is a signal handler: no logging or locks before ownership is safe.
+        pending.append((signum, frame))
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handler = signal.getsignal(signum)
+            if callable(handler):
+                handlers[signum] = handler
+                signal.signal(signum, collect)
+        yield
+    finally:
+        # Restore every disposition before a callback can raise cancellation.
+        try:
+            if signal.SIGINT in handlers:
+                signal.signal(signal.SIGINT, handlers[signal.SIGINT])
+        finally:
+            # A newly restored SIGINT may raise before this scope exits.
+            if signal.SIGTERM in handlers:
+                signal.signal(signal.SIGTERM, handlers[signal.SIGTERM])
+        for pending_signum, frame in pending:
+            handlers[pending_signum](pending_signum, frame)
+
+
 @logged
 def bounded_process(
-    argv, *, input=None, stdout=None, stderr=None, timeout=20, env=None, pass_fds=(), check=False
+    argv,
+    *,
+    input=None,
+    stdout=None,
+    stderr=None,
+    timeout=20,
+    env=None,
+    pass_fds=(),
+    check=False,
+    cancel=None,
 ):
     """Multiplex bounded pipes; no plaintext spooling and no unbounded communicate()."""
-    # Security review: caller supplies reviewed argv; shell execution is not enabled
-    proc = subprocess.Popen(  # nosec B603
-        argv,
-        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        pass_fds=pass_fds,
-        start_new_session=True,
-        bufsize=0,
-    )
-    selector = selectors.DefaultSelector()
-    data = {"out": bytearray(), "err": bytearray()}
-    # PIPE streams exist by Popen construction; stdin exists only with input.
-    outgoing = cast(BinaryIO, proc.stdout)
-    errors = cast(BinaryIO, proc.stderr)
-    incoming = cast(BinaryIO, proc.stdin)
-    pending = memoryview(input or b"")
-    deadline = time.monotonic() + timeout
+    if cancel is not None and cancel.is_set():
+        raise Failure("external_cancelled")
+    proc = None
+    selector = None
     try:
+        # Security review: caller supplies reviewed argv; shell execution is not enabled
+        with _deferred_interrupts():
+            proc = subprocess.Popen(  # nosec B603
+                argv,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                pass_fds=pass_fds,
+                start_new_session=True,
+                bufsize=0,
+            )
+        # Keep the established FD peak while protecting all post-spawn setup.
+        selector = selectors.DefaultSelector()
+        data = {"out": bytearray(), "err": bytearray()}
+        # PIPE streams exist by Popen construction; stdin exists only with input.
+        outgoing = cast(BinaryIO, proc.stdout)
+        errors = cast(BinaryIO, proc.stderr)
+        incoming = cast(BinaryIO, proc.stdin)
+        pending = memoryview(input or b"")
+        deadline = time.monotonic() + timeout
         for stream, name in ((outgoing, "out"), (errors, "err")):
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, name)
@@ -173,10 +223,20 @@ def bounded_process(
                 selector.register(incoming, selectors.EVENT_WRITE, "in")
             else:
                 incoming.close()
-        while selector.get_map():
+        # A child may close both pipes and keep running. Its remaining lifetime
+        # must obey the same cancellation and deadline as its output reads.
+        while selector.get_map() or proc.poll() is None:
+            if cancel is not None and cancel.is_set():
+                raise Failure("external_cancelled")
             left = deadline - time.monotonic()
             if left <= 0:
                 raise subprocess.TimeoutExpired(Path(argv[0]).name, timeout)
+            if not selector.get_map():
+                try:
+                    proc.wait(timeout=min(left, 0.05))
+                except subprocess.TimeoutExpired:
+                    pass
+                continue
             for item, _ in selector.select(min(left, 0.5)):
                 if item.data == "in":
                     try:
@@ -199,29 +259,33 @@ def bounded_process(
         rc = proc.wait(timeout=max(0.001, deadline - time.monotonic()))
         return subprocess.CompletedProcess(argv, rc, bytes(data["out"]), bytes(data["err"]))
     except BaseException:
-        event("external_error", "bounded_process", "terminated_own_process_group")
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if proc is not None:
+            event("external_error", "bounded_process", "terminated_own_process_group")
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         raise
     finally:
-        selector.close()
-        for cleanup_stream in (proc.stdin, proc.stdout, proc.stderr):
-            if cleanup_stream is not None:
-                cleanup_stream.close()
-        proc.wait()
+        try:
+            if proc is not None:
+                for cleanup_stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if cleanup_stream is not None:
+                        cleanup_stream.close()
+                proc.wait()
+        finally:
+            if selector is not None:
+                selector.close()
 
 
 @logged
 def attached_process(argv, *, stop):
     """Run a long child on this terminal's stdio and stop its unit on failure."""
     env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
-    # Security review: caller supplies reviewed argv; shell execution is not enabled
-    proc = subprocess.Popen(argv, env=env, close_fds=True)  # nosec B603
+    proc = None
 
     @logged
-    def cleanup():
+    def cleanup(proc):
         try:
             try:
                 # Security review: caller supplies reviewed argv; shell execution is not enabled
@@ -246,12 +310,16 @@ def attached_process(argv, *, stop):
                 proc.wait()
 
     try:
+        # Security review: caller supplies reviewed argv; shell execution is not enabled
+        with _deferred_interrupts():
+            proc = subprocess.Popen(argv, env=env, close_fds=True)  # nosec B603
         rc = proc.wait()
     except BaseException:
-        cleanup()
+        if proc is not None:
+            cleanup(proc)
         raise
     if rc:
-        cleanup()
+        cleanup(proc)
     return rc
 
 
@@ -288,7 +356,7 @@ class Context:
             raise Failure("root_required: run sudo yggctl")
 
     @logged
-    def run(self, argv, *, timeout=20, check=True, input=None, pass_fds=()):
+    def run(self, argv, *, timeout=20, check=True, input=None, pass_fds=(), cancel=None):
         executable = Path(argv[0]).name
         event("external_start", executable)
         env = {
@@ -306,6 +374,7 @@ class Context:
                 env=env,
                 pass_fds=pass_fds,
                 check=False,
+                **({} if cancel is None else {"cancel": cancel}),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             event("external_error", executable, type(exc).__name__)

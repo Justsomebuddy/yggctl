@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+- Defer handled SIGINT/SIGTERM during main-thread subprocess creation until
+  the executor owns the child, then deliver cancellation and clean it up.
+  Restore the original handlers and preserve child signal dispositions;
+  broker threads keep their existing cancellation path.
+- Protect post-spawn setup failures and attached-launcher startup cancellation
+  with the same owned-process cleanup.
+- Cancel and reap an active broker admin subprocess before broker shutdown
+  returns, including command interruption and worker-launcher failure. Keep
+  cancellation local to the broker; other concurrent brokers retain their
+  requests and normal timeout behavior.
+- Apply cancellation and the existing deadline while waiting for a child that
+  has already closed its output pipes. No role, admin allowlist or deployment
+  privilege changes.
+
 ## [5.14.1] - 2026-10-27
 
 - Normalize calendar overflow during research timestamp UTC conversion and
