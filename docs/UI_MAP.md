@@ -4,6 +4,16 @@
 |---|---|---|---|
 | IPC-ADMIN-CANCEL | Existing sandboxed command with an active allowlisted admin read; command interruption or worker-launcher failure closes its root broker | The original command/launcher failure remains authoritative. The active admin read is cancelled internally with `external_cancelled`; a closed IPC does not claim a valid response. Normal successful replies, nonzero statuses and request deadlines are unchanged. | Broker shutdown cancels and waits for its own admin subprocess to be killed and reaped before returning. Other brokers sharing a Context are unaffected. No node, peer, firewall, stored observation or notification mutation. |
 
+Main-thread external commands also defer their callable SIGINT/SIGTERM handlers
+while constructing a subprocess. Once the Popen object is owned, the original
+handlers are restored and any deferred cancellation is delivered inside the
+cleanup scope. Attached startup cancellation invokes the existing unit-stop
+and launcher-reap path. Ignored/default dispositions and broker-thread
+signal handling are unchanged; the child's inherited signal mask is unchanged.
+This ensures cleanup of owned processes, not rollback of effects an external
+command completed before cancellation. SIGKILL, kernel-blocked creation and
+forced termination of the parent remain outside orderly cleanup guarantees.
+
 This covers orderly broker cleanup after handled interruption or worker failure.
 It does not promise cleanup after an unhandled root-parent SIGKILL, kernel failure
 or host power loss. A deployment's systemd cgroup cleanup is a separate safeguard.

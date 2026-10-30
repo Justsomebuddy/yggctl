@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Defer handled SIGINT/SIGTERM during main-thread subprocess creation until
+  the executor owns the child, then deliver cancellation and clean it up.
+  Restore the original handlers and preserve child signal dispositions;
+  broker threads keep their existing cancellation path.
+- Protect post-spawn setup failures and attached-launcher startup cancellation
+  with the same owned-process cleanup.
 - Cancel and reap an active broker admin subprocess before broker shutdown
   returns, including command interruption and worker-launcher failure. Keep
   cancellation local to the broker; other concurrent brokers retain their
